@@ -1,12 +1,10 @@
-from processors.entities import BaseRegexComponent
+from processors.entities import BaseMatcherComponent
 from spacy.language import Language
 
 @Language.factory("person_component")
-class PersonComponent(BaseRegexComponent):
+class PersonComponent(BaseMatcherComponent):
     @property
     def label(self):
-        return "PERSON"
+        return "PER"
 
-    @property
-    def pattern_str(self):
-        return r"ОСОБА_\d+"
+    patterns = [[{"TEXT": {"REGEX": r"ОСОБА_\d+"}}]]

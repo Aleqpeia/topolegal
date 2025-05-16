@@ -1,8 +1,18 @@
 from spacy.language import Language
-from processors.entities import BaseListComponent
+from processors.entities import BaseMatcherComponent
 
+_DOC_KEYWORDS = [
+    "ухвала",
+    "постанова",
+    "рішення",
+    "скарга",
+    "клопотання",
+]
 
 @Language.factory("doctype_component")
-class DocTypeComponent(BaseListComponent):
-    label = "DOCTYPE"
-    terms = ["скарга", "ухвала", "постанова", "рішення", "клопотання"]
+class DocTypeComponent(BaseMatcherComponent):
+    @property
+    def label(self):
+        return "DTYPE"
+
+    patterns = [[{"LOWER": kw}] for kw in _DOC_KEYWORDS]

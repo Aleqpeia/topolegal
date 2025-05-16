@@ -1,24 +1,20 @@
-from processors.entities import BaseRegexComponent
+from processors.entities import BaseMatcherComponent
 from spacy.language import Language
 
+_CASE_FORMS = [
+    "провадження",   # nom / acc / gen
+    "провадженню",   # dat
+    "провадженні",   # loc
+    "провадженням",  # instr
+]
+
 @Language.factory("case_component")
-class CaseComponent(BaseRegexComponent):
+class CaseComponent(BaseMatcherComponent):
     @property
     def label(self) -> str:
-        return "CASE_NUMBER"
+        return "CASEID"
 
-    @property
-    def pattern_str(self) -> str:
-        # matches all Ukrainian cases for 'провадження' plus number (№...)
-        forms = [
-            "провадження",    # nominative, genitive, accusative
-            "провадженню",    # dative
-            "провадженні",    # locative
-            "провадженням",   # instrumental
-        ]
-        # escape each form for regex safety
-        escaped = [rf"{form}" for form in forms]
-        # join into a single group
-        forms_regex = "|".join(escaped)
-        # full pattern: word boundary, one of the forms, space, №digits
-        return rf"\b(?:{forms_regex})\s+№\d+\b"
+    patterns = [[
+        {"LOWER": {"IN": _CASE_FORMS}},
+        {"TEXT": {"REGEX": r"№\\d+"}}
+    ]]

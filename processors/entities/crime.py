@@ -1,7 +1,16 @@
 from spacy.language import Language
-from processors.entities import BaseListComponent
+from processors.entities import BaseMatcherComponent
+
+_CRIME_WORDS = [
+    "крадіжка",
+    "бездіяльність",
+    "шахрайство",
+    "хуліганство",
+    # extend with more Criminal Code terms…
+]
+
 
 @Language.factory("crime_component")
-class CrimeComponent(BaseListComponent):
+class CrimeComponent(BaseMatcherComponent):
     label = "CRIME"
-    terms = ["крадіжка", "бездіяльність", "шахрайство", "хуліганство"]
+    patterns = [[{"LOWER": kw}] for kw in _CRIME_WORDS]
