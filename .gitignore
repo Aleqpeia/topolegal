@@ -1,3 +1,6 @@
 tmp
 \n.ipynb_checkpoints
 .env
+!/docs/
+!/models/
+!/tests/
