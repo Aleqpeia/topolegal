@@ -1,6 +1,8 @@
 from processors.entities import BaseMatcherComponent
 from spacy.language import Language
 
+
+# some abstraction needed for span around № selection
 _CASE_FORMS = [
     "провадження",   # nom / acc / gen
     "провадженню",   # dat
