@@ -1,30 +1,41 @@
 #!/usr/bin/env python3
 """
-Entry point for legal-text NER extraction using custom spaCy components
-and BigQuery flag checking with service account authentication.
+Entry point for legal-text NER extraction from metadata CSV and local docs directory,
+writes per-document tag CSVs.
 
 Usage:
-    python -m processors.entities [--test-bq] [INPUT_FILE] [DOC_ID]
-    cat file.txt | python -m processors.entities [--test-bq] [DOC_ID]
+    python -m processors.entities \
+        --input-csv METADATA_CSV \
+        [--docs-dir DOCS_DIR] \
+        [--use-pretrained]
 
-Options:
-    --test-bq      Run a simple BigQuery SELECT 1 to verify connectivity.
+The metadata CSV must include a 'doc_id' column. For each doc_id, the script will load
+"{docs_dir}/{doc_id}.txt" and write tags to "{docs_dir}/{doc_id}_tags.csv".
 
-Authentication:
-    Set GOOGLE_APPLICATION_CREDENTIALS to your service key JSON path.
-    Optionally place in a `.env` file to load automatically.
+Logging:
+    Logs are written to the file specified by LOG_FILE env (default: ner_processing.log).
 """
 import sys
 import os
 import argparse
-from dotenv import load_dotenv
+import csv
+import logging
 import spacy
-from google.cloud import bigquery
-from google.oauth2 import service_account
+from dotenv import load_dotenv
 
-# Load .env
-load_dotenv(dotenv_path="/home/efyis/RustroverProjects/topolegal/processors/entities/.env")
-print(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+# Load environment variables
+load_dotenv()
+
+# Configure logging
+LOG_FILE = os.getenv('LOG_FILE', 'ner_processing.log')
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s [%(module)s]: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
 # Register custom components
 import processors.entities.person
 import processors.entities.date
@@ -35,72 +46,78 @@ import processors.entities.crime
 
 
 def build_pipeline(use_pretrained: bool = False):
-    nlp = spacy.load("uk_core_news_sm") if use_pretrained else spacy.blank("uk")
-    for name in [
+    model = "uk_core_news_sm" if use_pretrained else None
+    nlp = spacy.load(model) if model else spacy.blank("uk")
+    components = [
         "person_component",
         "date_component",
         "case_component",
         "role_component",
         "doctype_component",
         "crime_component",
-    ]:
+    ]
+    for name in components:
         nlp.add_pipe(name, last=True)
+    logger.info("Pipeline built (pretrained=%s) with components: %s", use_pretrained, nlp.pipe_names)
     return nlp
 
 
-def get_bigquery_client():
-    key_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-
-    creds = service_account.Credentials.from_service_account_file(key_path)
-    return bigquery.Client(credentials=creds, project=creds.project_id)
-
-
-def test_bigquery(client):
+def process_document(nlp, docs_dir: str, doc_id: str, text: str):
+    """Process a single document text and write tags CSV."""
+    logger.info("Processing doc_id=%s (length=%d)", doc_id, len(text))
+    doc = nlp(text)
+    tags_path = os.path.join(docs_dir, f"{doc_id}_tags.csv")
     try:
-        query_job = client.query("SELECT 1 AS test_field")
-        result = next(iter(query_job.result()))
-        print(f"BigQuery test succeeded: {result.test_field}")
-        sys.exit(0)
+        with open(tags_path, 'w', newline='', encoding='utf-8') as tagfile:
+            writer = csv.writer(tagfile)
+            writer.writerow(['label', 'text', 'start_char', 'end_char'])
+            for ent in doc.ents:
+                logger.info("Tagging %s: '%s' [%d-%d] in doc_id=%s",
+                            ent.label_, ent.text, ent.start_char, ent.end_char, doc_id)
+                writer.writerow([ent.label_, ent.text, ent.start_char, ent.end_char])
     except Exception as e:
-        sys.exit(f"BigQuery test failed: {e}")
-
-
-def check_flag_present(table_ref: str, doc_id: str, client) -> bool:
-    query = f"SELECT flag FROM `{table_ref}` WHERE doc_id = @doc_id LIMIT 1"
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("doc_id", "STRING", doc_id)]
-    )
-    rows = client.query(query, job_config=job_config).result()
-    return any(row.flag for row in rows)
+        logger.error("Failed writing tags for %s: %s", doc_id, e)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="NER + BigQuery flag checker")
-    parser.add_argument("input", nargs="?", help="Input file path")
-    parser.add_argument("doc_id", help="Document identifier (or skip if --test-bq)")
-    parser.add_argument("--test-bq", action="store_true", help="Test BigQuery connectivity and exit")
+    parser = argparse.ArgumentParser(description="NER from metadata and docs directory, per-doc CSV output")
+    parser.add_argument("--input-csv", required=True,
+                        help="Path to metadata CSV with 'doc_id' column")
+    parser.add_argument("--docs-dir", default="docs",
+                        help="Directory containing text files named '<doc_id>.txt' and for tags output")
+    parser.add_argument("--use-pretrained", action="store_true",
+                        help="Use pretrained spaCy model instead of blank model")
     args = parser.parse_args()
 
-    client = get_bigquery_client()
-    if args.test_bq:
-        test_bigquery(client)
+    meta_path = args.input_csv
+    docs_dir = args.docs_dir
+    if not os.path.isfile(meta_path):
+        logger.error("Metadata CSV not found: %s", meta_path)
+        sys.exit(f"Error: metadata CSV not found at {meta_path}")
+    if not os.path.isdir(docs_dir):
+        logger.error("Docs directory not found: %s", docs_dir)
+        sys.exit(f"Error: docs directory not found at {docs_dir}")
 
-    # Read input
-    if args.input and os.path.isfile(args.input):
-        text = open(args.input, encoding="utf-8").read()
-    else:
-        text = sys.stdin.read()
-    doc_id = args.doc_id
+    nlp = build_pipeline(use_pretrained=args.use_pretrained)
 
-    table_ref = os.getenv("BQ_TABLE", "project.dataset.flags_table")
-    if check_flag_present(table_ref, doc_id, client):
-        sys.exit(f"FLAG_PRESENT for doc_id={doc_id}, skipping...")
-
-    nlp = build_pipeline(use_pretrained=False)
-    doc = nlp(text)
-    for ent in doc.ents:
-        print(f"{ent.label_}\t{ent.text}\t{ent.start_char}\t{ent.end_char}")
-
+    with open(meta_path, newline='', encoding='utf-8') as csvfile:
+        reader = csv.DictReader(csvfile)
+        if 'doc_id' not in reader.fieldnames:
+            logger.error("'doc_id' column missing in metadata CSV")
+            sys.exit("Error: 'doc_id' column missing in metadata CSV")
+        for row in reader:
+            doc_id = row['doc_id']
+            text_file = os.path.join(docs_dir, f"{doc_id}.txt")
+            if not os.path.isfile(text_file):
+                logger.warning("Text file missing for doc_id=%s: %s", doc_id, text_file)
+                continue
+            try:
+                with open(text_file, encoding='utf-8') as f:
+                    text = f.read()
+            except Exception as e:
+                logger.error("Failed reading %s: %s", text_file, e)
+                continue
+            process_document(nlp, docs_dir, doc_id, text)
 
 if __name__ == "__main__":
     main()
