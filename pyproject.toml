@@ -2,7 +2,7 @@
 name = "topolegal"
 version = "0.1.0"
 description = "Add your description here"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 dependencies = [
     "google-cloud==0.34.0",
     "google-cloud-bigquery==3.32.0",
@@ -15,7 +15,7 @@ dependencies = [
     "python-dotenv>=1.1.0",
     "spacy>=3.8.5",
     "pip>=25.1.1",
-    "spacy-transformers==1.3.8",
+    "spacy-transformers>=1.3.8",
     "transformers>=4.49.0",
     "aim-spacy==0.2.0",
     "ftfy>=6.3.1",
@@ -23,3 +23,4 @@ dependencies = [
     "pandoc==2.4",
     "striprtf>=0.0.29",
 ]
+
