@@ -2,6 +2,7 @@ import spacy
 from abc import ABC, abstractmethod, abstractproperty
 from spacy.language import Language
 import re
+import gliner_spacy.pipeline import GlinerSpacy
 from spacy.matcher import Matcher
 from spacy.util import filter_spans
 
