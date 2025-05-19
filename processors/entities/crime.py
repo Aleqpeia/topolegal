@@ -6,7 +6,6 @@ _CRIME_WORDS = [
     "бездіяльність",
     "шахрайство",
     "хуліганство",
-    # extend with more Criminal Code terms…
 ]
 
 

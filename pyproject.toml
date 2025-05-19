@@ -16,12 +16,16 @@ dependencies = [
     "spacy>=3.8",
     "pip>=25.1.1",
     "spacy-transformers>=1.3.8",
-    "gliner>=0.2.10",
+    "gliner==0.2.19",
     "gliner-spacy>=0.0.9",
     "transformers>=4.49.0",
     "ftfy>=6.3.1",
     "pypandoc==1.15",
     "pandoc==2.4",
     "striprtf>=0.0.29",
+    "snowballstemmer>=3.0.1",
+    "psycopg>=3.2.9",
+    "requests>=2.32.3",
+    "psycopg-binary>=3.2.9",
 ]
 
