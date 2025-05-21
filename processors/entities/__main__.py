@@ -68,6 +68,8 @@ def clean(text: str) -> str:
     return text.strip()
 
 
+
+
 def _law_url(code: str, art: str) -> str:
     code = code.upper()
     law_id = LAW_CODE_URLS.get(code)
@@ -76,7 +78,7 @@ def _law_url(code: str, art: str) -> str:
     return f"https://zakon.rada.gov.ua/laws/main?query=ст.{art}%20{code}%20України"
 
 
-def link_tokens(text: str) -> str:
+def _insert_tokens(text: str) -> str:
     """Wrap URLs, ЄРДР ids, single & plural article refs with ⟪L|…⟫ … ⟪/L⟫."""
 
     # 1) bare URLs
@@ -115,6 +117,31 @@ def link_tokens(text: str) -> str:
 
     text = RE_ART.sub(_single, text)
     return text
+
+# ───────────────────────── text utils ─────────────────────────────────────-
+
+TOK_RE = re.compile(fr"{re.escape(START)}([^⟫]+)⟫(.*?){re.escape(STOP)}")
+
+def annotate_links(raw: str) -> tuple[str, list[dict]]:
+    """Return (plain_text, links).  links = [{url,text,start,end}, …]."""
+    marked = _insert_tokens(raw)          # reuse your old logic
+
+    out, links, i_plain, i_src = [], [], 0, 0
+    for m in TOK_RE.finditer(marked):
+        pre = marked[i_src:m.start()]
+        out.append(pre); i_plain += len(pre)
+
+        span = m[2]
+        out.append(span)
+        links.append({"url": m[1], "text": span,
+                      "start": i_plain, "end": i_plain + len(span)})
+        i_plain += len(span); i_src = m.end()
+
+    out.append(marked[i_src:])
+    return "".join(out), links
+
+
+
 # ───────────────────────── spaCy pipeline  ────────────────────────────────
 import processors.entities.person    # noqa: F401
 import processors.entities.date      # noqa: F401
@@ -129,9 +156,10 @@ import processors.entities.number
 
 RULE_COMPONENTS = [
     "person_component", "date_component", "role_component",
-    "doctype_component", "crime_component",
+    "doctype_component", "crime_component", "adress_component",
+    "info_component", "number_component",
 ]
-LABELS = ["PERSON", "DATE", "ROLE", "DOCTYPE", "CRIME"]
+LABELS = ["INFO", "DATE", "LOC" "ROLE", "DOCTYPE", "CRIME", "NUM"]
 
 def build_nlp(use_pretrained: bool):
     nlp = spacy.load("uk_core_news_trf") if use_pretrained else spacy.blank("uk")
@@ -166,7 +194,7 @@ def run_postgres(dsn: str, table: str, batch: int, nlp):
     import psycopg
 
     fetch_q = f"SELECT doc_id, doc_url FROM {table} WHERE text IS NULL LIMIT %s"
-    upd_q   = f"UPDATE {table} SET text = %s, ner_tags = %s WHERE doc_id = %s"
+    upd_q   = f"UPDATE {table} SET text = %s, links = %s, ner_tags = %s WHERE doc_id = %s"
 
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:
@@ -178,9 +206,9 @@ def run_postgres(dsn: str, table: str, batch: int, nlp):
                     break
                 for doc_id, url in rows:
                     try:
-                        plain = link_tokens(clean(rtf_to_plain(fetch_rtf(url))))
+                        plain, links = annotate_links(clean(rtf_to_plain(fetch_rtf(url))))
                         tags_json = analyse(plain, nlp)
-                        cur.execute(upd_q, (plain, tags_json, doc_id))
+                        cur.execute(upd_q, (plain, links, tags_json, doc_id))
                         total += 1
                     except Exception as e:
                         logging.error("PG doc %s: %s", doc_id, e)
@@ -202,18 +230,20 @@ def run_bigquery(table: str, batch: int, nlp):
             break
         for _, r in rows.iterrows():
             try:
-                plain = link_tokens(clean(rtf_to_plain(fetch_rtf(r.doc_url))))
+                plain, links = annotate_links(clean(rtf_to_plain(fetch_rtf(r.doc_url))))
                 tags_json = analyse(plain, nlp)
                 client.query(
                     f"""
                     UPDATE `{table}`
                        SET text = @text,
+                           links = @links,
                            ner_tags = @tags
                      WHERE doc_id = @id
                     """,
                     job_config=bigquery.QueryJobConfig(
                         query_parameters=[
                             bigquery.ScalarQueryParameter("text", "STRING", plain),
+                            bigquery.ScalarQueryParameter("links", "STRING", links),
                             bigquery.ScalarQueryParameter("tags", "STRING", tags_json),
                             bigquery.ScalarQueryParameter("id",   "STRING", r.doc_id),
                         ]
@@ -225,12 +255,13 @@ def run_bigquery(table: str, batch: int, nlp):
         logging.info("BQ processed %d", total)
 
 # --------------------------- backend: test mode ---------------------------
+# 234 CK - text + pos
 
 def run_test(source: str, nlp, port: int):
     """Serve a single annotated document on http://127.0.0.1:<port>."""
-    plain = link_tokens(clean(rtf_to_plain(fetch_rtf(source))))
-    logging.info(plain)
-    print(plain)
+    plain, links = annotate_links(clean(rtf_to_plain(fetch_rtf(source))))
+    logging.info(plain, links)
+    print(plain,links)
     doc = nlp(plain); doc.ents = filter_spans(doc.ents)
 
     logging.info("Starting displaCy at http://127.0.0.1:%d — press Ctrl+C to stop", port)

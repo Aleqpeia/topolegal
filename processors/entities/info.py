@@ -5,6 +5,6 @@ from spacy.language import Language
 class PersonComponent(BaseMatcherComponent):
     @property
     def label(self):
-        return "LOC"
+        return "INFO"
 
     patterns = [[{"TEXT": {"REGEX": r"ІНФОРМАЦІЯ_\d+"}}]]
