@@ -121,25 +121,27 @@ def _insert_tokens(text: str) -> str:
 # ───────────────────────── text utils ─────────────────────────────────────-
 
 TOK_RE = re.compile(fr"{re.escape(START)}([^⟫]+)⟫(.*?){re.escape(STOP)}")
+ART_ANCHOR_RE = re.compile(r"/laws/show/(?P<law>[0-9\-]+)#n(?P<art>[0-9]+)")
 
 def annotate_links(raw: str) -> tuple[str, list[dict]]:
-    """Return (plain_text, links).  links = [{url,text,start,end}, …]."""
-    marked = _insert_tokens(raw)          # reuse your old logic
-
-    out, links, i_plain, i_src = [], [], 0, 0
+    """Return *(plain_text, links)* with inline code/art if applicable."""
+    marked = _insert_tokens(raw)
+    plain_parts: list[str] = []
+    links: list[dict] = []
+    p_idx = s_idx = 0
     for m in TOK_RE.finditer(marked):
-        pre = marked[i_src:m.start()]
-        out.append(pre); i_plain += len(pre)
-
-        span = m[2]
-        out.append(span)
-        links.append({"url": m[1], "text": span,
-                      "start": i_plain, "end": i_plain + len(span)})
-        i_plain += len(span); i_src = m.end()
-
-    out.append(marked[i_src:])
-    return "".join(out), links
-
+        pre = marked[s_idx:m.start()]; plain_parts.append(pre); p_idx += len(pre)
+        url, span = m[1], m[2]; start, end = p_idx, p_idx+len(span)
+        rec = {"url": url, "text": span, "start": start, "end": end}
+        ac = ART_ANCHOR_RE.search(url)
+        if ac:
+            law, art = ac.group("law"), ac.group("art")
+            for code,lid in LAW_CODE_URLS.items():
+                if lid==law:
+                    rec.update({"code": code, "art": art}); break
+        links.append(rec); plain_parts.append(span); p_idx=end; s_idx=m.end()
+    plain_parts.append(marked[s_idx:])
+    return "".join(plain_parts), links
 
 
 # ───────────────────────── spaCy pipeline  ────────────────────────────────
