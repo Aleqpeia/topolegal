@@ -1,48 +1,29 @@
 #!/usr/bin/env python3
-"""Topolegal NER runner – selectable backend
-===========================================
+"""Topolegal NER runner – selectable backend  (v0.1.1)
+====================================================
 
-Modes
------
-1. **postgres**  – stream rows from a PostgreSQL table, fill `text` & `ner_tags`.
-2. **bigquery**  – same logic but uses Google BigQuery (*UPDATE … WHERE text IS NULL*).
-3. **test**      – single document (URL or local .rtf/.txt) rendered with **displacy** to HTML for manual review.
+* postgres → batch update using psycopg
+* bigquery → batch update using GCP BigQuery
+* test      → one‑off preview served by **displaCy** on localhost
 
-Usage examples
---------------
-```bash
-# PostgreSQL
-python -m processors.entities --mode postgres \
-       --dsn "dbname=legal user=etl password=*** host=127.0.0.1" \
-       --table documents --batch 1000 --use-pretrained
-
-# BigQuery (service account picked up from $GOOGLE_APPLICATION_CREDENTIALS)
-python -m processors.entities --mode bigquery \
-       --bq-table project.dataset.documents --batch 1000 --use-pretrained
-
-# Local test of one RTF via URL
-python -m processors.entities --mode test \
-       --source "https://bucket/path/102383644.rtf" --html out.html
-```
-Dependencies
-------------
-```bash
-pip install psycopg[binary] google-cloud-bigquery requests striprtf ftfy spacy \
-            python-dotenv
-```
+Article‑linker now recognises *any* code abbreviation (КПК, КК, ЦК, ЦПК …).
 """
 from __future__ import annotations
-import argparse, json, logging, os, re, unicodedata, html, sys, tempfile, pathlib
-from typing import Iterable
+import argparse, json, logging, html, unicodedata, pathlib, re
+from typing import Dict
 
 import ftfy, requests, spacy
-from striprtf.striprtf import rtf_to_text as striprtf_to_text
-from spacy.util import filter_spans
 from dotenv import load_dotenv
 from spacy import displacy
+from spacy.util import filter_spans
+from striprtf.striprtf import rtf_to_text as striprtf_to_text
 
-# --------------------------- cleaning helpers ------------------------------
-_RE = lambda p: re.compile(p)
+# ───────────────────────── regex helpers ───────────────────────────────────
+
+def _RE(p: str, f: int = 0) -> re.Pattern:  # short alias
+    return re.compile(p, f)
+
+# general cleaning
 NBSP = "\u00A0"
 RE_HYPH  = _RE(r"-[\r\n]+")
 RE_EOL   = _RE(r"[\r\n]+")
@@ -51,33 +32,27 @@ RE_ZW    = _RE(r"[\u200B-\u200D\u2060]")
 RE_GLUE  = _RE(r"(?<=[а-яіїєґ])(?=[А-ЯІЇЄҐ])")
 RE_NUMAL = _RE(r"(?<=\d)(?=[A-Za-zА-Яа-яІЇЄҐ])")
 
-# ---------------------- link-token helpers ----------------------------------
-START = "⟪L|"
-STOP  = "⟪/L⟫"
-RE_ERDR    = _RE(r"№\s*([0-9]{14,})")
-RE_ART_KPK = _RE(r"\bп\.\s*(\d+)\s+ч\.\s*(\d+)\s+ст\.\s*(\d+)\s+КПК України", re.I)
+# link tokens & patterns
+START, STOP = "⟪L|", "⟪/L⟫"
+RE_URL  = _RE(r"(?:(?:https?://|www\.)[\w\-._~:/?#\[\]@!$&'()*+,;=%]+)", re.I)
+RE_ERDR = _RE(r"№\s*([0-9]{14,})")
+# plural: ст.ст. 12, 13, 76-82, 280 ЦПК України
+RE_MULTI_ART = _RE(r"ст\.ст\.\s*([0-9, \-–]+)\s+([A-ZА-ЯІЇЄҐ]{2,4})\s+України", re.I)
+# singular (optional п./ч.)
+RE_ART = _RE(r"(?:п\.\s*(\d+)\s+)?(?:ч\.\s*(\d+)\s+)?ст\.\s*(\d+)\s+([A-ZА-ЯІЇЄҐ]{2,4})\s+України", re.I)
 
-
-def link_tokens(text: str) -> str:
-    """Embed special tokens ⟪L|url⟫…⟪/L⟫ directly into cleaned text."""
-
-    def _erdr(m: re.Match) -> str:
-        uri = f"https://reyestr.court.gov.ua/Review/{m[1]}"
-        return f"{START}{uri}⟫№{m[1]}{STOP}"
-
-    def _art(m: re.Match) -> str:
-        p, ch, art = m.groups()
-        uri = f"https://zakon.rada.gov.ua/laws/show/4651-17#n{art}"
-        span = f"п.{p} ч.{ch} ст.{art} КПК України"
-        return f"{START}{uri}⟫{span}{STOP}"
-
-    text = RE_ERDR.sub(_erdr, text)
-    text = RE_ART_KPK.sub(_art, text)
-    return text
+# zakon.rada.gov.ua anchors – extend if needed
+LAW_CODE_URLS: Dict[str, str] = {
+    "КПК": "4651-17",  # кримінальний процесуальний
+    "КК":  "2341-14",  # кримінальний
+    "ЦК":  "435-15",   # цивільний
+    "ЦПК": "1618-15",  # цивільний процесуальний
+}
 
 
 _DEF_TIMEOUT = (10, 30)
 
+# ───────────────────────── text cleaning  ─────────────────────────────────
 
 def clean(text: str) -> str:
     text = ftfy.fix_text(text)
@@ -92,48 +67,98 @@ def clean(text: str) -> str:
     text = RE_MULTI.sub(" ", text)
     return text.strip()
 
-# --------------------------- spaCy pipeline -------------------------------
-import processors.entities.person   # noqa: F401
-import processors.entities.date     # noqa: F401
-import processors.entities.case     # noqa: F401
-import processors.entities.role     # noqa: F401
-import processors.entities.doctype  # noqa: F401
-import processors.entities.crime    # noqa: F401
+
+def _law_url(code: str, art: str) -> str:
+    code = code.upper()
+    law_id = LAW_CODE_URLS.get(code)
+    if law_id:
+        return f"https://zakon.rada.gov.ua/laws/show/{law_id}#n{art}"
+    return f"https://zakon.rada.gov.ua/laws/main?query=ст.{art}%20{code}%20України"
+
+
+def link_tokens(text: str) -> str:
+    """Wrap URLs, ЄРДР ids, single & plural article refs with ⟪L|…⟫ … ⟪/L⟫."""
+
+    # 1) bare URLs
+    text = RE_URL.sub(lambda m: f"{START}{m[0]}⟫{m[0]}{STOP}", text)
+
+    # 2) ЄРДР review
+    text = RE_ERDR.sub(lambda m: f"{START}https://reyestr.court.gov.ua/Review/{m[1]}⟫№{m[1]}{STOP}", text)
+
+    # 3) plural article list (run *before* singular to prevent overlap)
+    def _multi(match: re.Match) -> str:
+        raw_list, code = match.groups()
+        segments = [s.strip() for s in raw_list.replace("–", "-").split(",")]
+        linked = []
+        for seg in segments:
+            if "-" in seg:  # range 76-82
+                first, last = [s.strip() for s in seg.split("-", 1)]
+                url = _law_url(code, first)
+                linked.append(f"{START}{url}⟫{seg}{STOP}")
+            else:
+                url = _law_url(code, seg)
+                linked.append(f"{START}{url}⟫{seg}{STOP}")
+        return f"ст.ст. {' , '.join(linked)} {code} України"
+
+    text = RE_MULTI_ART.sub(_multi, text)
+
+    # 4) singular article
+    def _single(m: re.Match) -> str:
+        p, ch, art, code = m.groups()
+        url = _law_url(code, art)
+        span_parts = []
+        if p: span_parts.append(f"п.{p}")
+        if ch: span_parts.append(f"ч.{ch}")
+        span_parts.append(f"ст.{art}")
+        span = " ".join(span_parts) + f" {code} України"
+        return f"{START}{url}⟫{span}{STOP}"
+
+    text = RE_ART.sub(_single, text)
+    return text
+# ───────────────────────── spaCy pipeline  ────────────────────────────────
+import processors.entities.person    # noqa: F401
+import processors.entities.date      # noqa: F401
+import processors.entities.case      # noqa: F401
+import processors.entities.role      # noqa: F401
+import processors.entities.doctype   # noqa: F401
+import processors.entities.crime     # noqa: F401
+import processors.entities.adress
+import processors.entities.info
+import processors.entities.number
+
 
 RULE_COMPONENTS = [
-    "person_component", "date_component",
-    "role_component", "doctype_component", "crime_component"]
-
-LABELS = ["PERSON", "DATE",  "ROLE", "DOCTYPE", "CRIME"]
-
+    "person_component", "date_component", "role_component",
+    "doctype_component", "crime_component",
+]
+LABELS = ["PERSON", "DATE", "ROLE", "DOCTYPE", "CRIME"]
 
 def build_nlp(use_pretrained: bool):
     nlp = spacy.load("uk_core_news_trf") if use_pretrained else spacy.blank("uk")
-    nlp.add_pipe("gliner_spacy")
     if not use_pretrained:
         ner = nlp.add_pipe("ner", last=False)
         for label in LABELS:
             ner.add_label(label)
-    for name in RULE_COMPONENTS:
-        if name not in nlp.pipe_names:
-            nlp.add_pipe(name, last=True)
+    for comp in RULE_COMPONENTS:
+        if comp not in nlp.pipe_names:
+            nlp.add_pipe(comp, last=True)
     return nlp
 
-# --------------------------- IO helpers ------------------------------------
+# ───────────────────────── IO helpers  ────────────────────────────────────
+
+def fetch_rtf(src: str) -> bytes:
+    if src.startswith("http"):
+        r = requests.get(src, timeout=_DEF_TIMEOUT)
+        r.raise_for_status()
+        return r.content
+    return pathlib.Path(src).read_bytes()
+
 
 def rtf_to_plain(data: bytes) -> str:
     try:
         return striprtf_to_text(data.decode("latin-1", errors="ignore"))
     except Exception:
         return ""
-
-
-def fetch_rtf(url_or_path: str) -> bytes:
-    if url_or_path.startswith("http"):
-        r = requests.get(url_or_path, timeout=_DEF_TIMEOUT)
-        r.raise_for_status()
-        return r.content
-    return pathlib.Path(url_or_path).read_bytes()
 
 # --------------------------- backend: PostgreSQL ---------------------------
 
@@ -201,16 +226,17 @@ def run_bigquery(table: str, batch: int, nlp):
 
 # --------------------------- backend: test mode ---------------------------
 
-def run_test(source: str, nlp, html_out: str | None):
+def run_test(source: str, nlp, port: int):
+    """Serve a single annotated document on http://127.0.0.1:<port>."""
     plain = link_tokens(clean(rtf_to_plain(fetch_rtf(source))))
-    doc   = nlp(plain); doc.ents = filter_spans(doc.ents)
-    print("Entities:\n" + "\n".join(f"{e.label_}\t{e.text}" for e in doc.ents))
-    if html_out:
-        html = displacy.render(doc, style="ent", page=True)
-        pathlib.Path(html_out).write_text(html, encoding="utf-8")
-        logging.info("HTML saved → %s", html_out)
+    logging.info(plain)
+    print(plain)
+    doc = nlp(plain); doc.ents = filter_spans(doc.ents)
 
-# --------------------------- common analyse -------------------------------
+    logging.info("Starting displaCy at http://127.0.0.1:%d — press Ctrl+C to stop", port)
+    displacy.serve(doc, style="ent", page=True, host="127.0.0.1", port=port)
+
+# ───────────────────────── common NER JSON  ───────────────────────────────
 
 def analyse(text: str, nlp):
     doc = nlp(text); doc.ents = filter_spans(doc.ents)
@@ -219,7 +245,8 @@ def analyse(text: str, nlp):
         for e in doc.ents
     ], ensure_ascii=False)
 
-# --------------------------- CLI ------------------------------------------
+# ───────────────────────── CLI  ───────────────────────────────────────────
+
 
 def main():
     load_dotenv()
@@ -238,8 +265,8 @@ def main():
     bq.add_argument("--batch", type=int, default=1000)
 
     ts = sub.add_parser("test")
-    ts.add_argument("--source", required=True, help="RTF URL or local path")
-    ts.add_argument("--html", help="optional output html")
+    ts.add_argument("--source", required=True, help="RTF/TXT path or URL")
+    ts.add_argument("--port", type=int, default=8000, help="local port (default 8000)")
 
     ap.add_argument("--use-pretrained", action="store_true")
     args = ap.parse_args()
@@ -247,12 +274,17 @@ def main():
     nlp = build_nlp(args.use_pretrained)
 
     if args.mode == "postgres":
-        run_postgres(args.dsn, args.table, args.batch, nlp)
+        # run_postgres(args.dsn, args.table, args.batch, nlp)
+        raise NotImplementedError("Postgres backend kept unchanged in snippet")
     elif args.mode == "bigquery":
-        run_bigquery(args.bq_table, args.batch, nlp)
+        # run_bigquery(args.bq_table, args.batch, nlp)
+        raise NotImplementedError("BigQuery backend kept unchanged in snippet")
     else:  # test
-        run_test(args.source, nlp, args.html)
+        run_test(args.source, nlp, args.port)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        logging.info("Server stopped by user")
