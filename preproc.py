@@ -50,6 +50,16 @@ RE_ZW    = re.compile(r"[\u200B-\u200D\u2060]")
 RE_GLUE  = re.compile(r"(?<=[а-яіїєґ])(?=[А-ЯІЇЄҐ])")
 RE_NUMAL = re.compile(r"(?<=\d)(?=[A-Za-zА-Яа-яІЇЄҐ])")
 
+# -----------------------------------------------------------------------
+# Post-processing helpers
+# -----------------------------------------------------------------------
+RE_ERDR   = re.compile(r"№\s*([0-9]{14,})")                   # ЄРДР id
+RE_ART_KPK= re.compile(r"\bп\.\s*(\d+)\s+ч\.\s*(\d+)\s+ст\.\s*(\d+)\s+КПК України", re.I)
+
+START = "⟪L|"   # ⟪L|<uri>⟫...⟪/L⟫   (easy to split later)
+STOP  = "⟪/L⟫"
+
+
 def clean(text: str) -> str:
     text = ftfy.fix_text(text)
     text = html.unescape(text)
@@ -124,6 +134,26 @@ def ensure_table(cur: sqlite3.Cursor, csv_columns: List[str]):
             text   TEXT
         )""")
 
+
+
+def link_tokens(text: str) -> str:
+    """Annotate spans – keep human-readable text, embed URI after START token."""
+
+    def _erdr(m: re.Match) -> str:
+        uri  = f"https://reyestr.court.gov.ua/Review/{m[1]}"
+        span = f"№{m[1]}"
+        return f"{START}{uri}⟫{span}{STOP}"
+
+    def _art(m: re.Match) -> str:
+        p, ch, art = m.groups()
+        uri  = f"https://zakon.rada.gov.ua/laws/show/4651-17#n{art}"
+        span = f"п.{p} ч.{ch} ст.{art} КПК України"
+        return f"{START}{uri}⟫{span}{STOP}"
+
+    text = RE_ERDR.sub(_erdr, text)
+    text = RE_ART_KPK.sub(_art, text)
+    return text
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -163,6 +193,7 @@ def main():
             try:
                 raw = rtf_to_text(src) if src.suffix.lower() == ".rtf" else read_txt_with_detect(src)
                 text = clean(raw)
+                text = link_tokens(text)
             except Exception as e:
                 logging.error("[%d] failed convert %s: %s", i, src.name, e); continue
 

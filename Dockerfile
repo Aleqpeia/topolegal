@@ -1,6 +1,6 @@
 # ---------- build stage -----------------------------------------------------
 FROM python:3.12-slim-bookworm AS build
-COPY --from=ghcr.io/astral-sh/uv:0.7.5 /uv /uvx  /bin/
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx  /bin/
 
 ARG PIP_NO_CACHE_DIR=1
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -27,7 +27,7 @@ WORKDIR /src
 COPY . .
 
 # Install Python deps (PEP-517 build)
-RUN uv sync --locked
+RUN uv sync
 
 RUN pip install spacy
 # Download spaCy Ukrainian models (small & transformer)

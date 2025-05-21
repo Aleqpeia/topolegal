@@ -40,7 +40,6 @@ from striprtf.striprtf import rtf_to_text as striprtf_to_text
 from spacy.util import filter_spans
 from dotenv import load_dotenv
 from spacy import displacy
-from gliner_spacy.pipeline import GlinerSpacy
 
 # --------------------------- cleaning helpers ------------------------------
 _RE = lambda p: re.compile(p)
@@ -51,6 +50,31 @@ RE_MULTI = _RE(r"[ \t]{2,}")
 RE_ZW    = _RE(r"[\u200B-\u200D\u2060]")
 RE_GLUE  = _RE(r"(?<=[а-яіїєґ])(?=[А-ЯІЇЄҐ])")
 RE_NUMAL = _RE(r"(?<=\d)(?=[A-Za-zА-Яа-яІЇЄҐ])")
+
+# ---------------------- link-token helpers ----------------------------------
+START = "⟪L|"
+STOP  = "⟪/L⟫"
+RE_ERDR    = _RE(r"№\s*([0-9]{14,})")
+RE_ART_KPK = _RE(r"\bп\.\s*(\d+)\s+ч\.\s*(\d+)\s+ст\.\s*(\d+)\s+КПК України", re.I)
+
+
+def link_tokens(text: str) -> str:
+    """Embed special tokens ⟪L|url⟫…⟪/L⟫ directly into cleaned text."""
+
+    def _erdr(m: re.Match) -> str:
+        uri = f"https://reyestr.court.gov.ua/Review/{m[1]}"
+        return f"{START}{uri}⟫№{m[1]}{STOP}"
+
+    def _art(m: re.Match) -> str:
+        p, ch, art = m.groups()
+        uri = f"https://zakon.rada.gov.ua/laws/show/4651-17#n{art}"
+        span = f"п.{p} ч.{ch} ст.{art} КПК України"
+        return f"{START}{uri}⟫{span}{STOP}"
+
+    text = RE_ERDR.sub(_erdr, text)
+    text = RE_ART_KPK.sub(_art, text)
+    return text
+
 
 _DEF_TIMEOUT = (10, 30)
 
@@ -116,26 +140,25 @@ def fetch_rtf(url_or_path: str) -> bytes:
 def run_postgres(dsn: str, table: str, batch: int, nlp):
     import psycopg
 
-    fetch = f"SELECT doc_id, doc_url FROM {table} WHERE text IS NULL LIMIT %s"
-    update = f"UPDATE {table} SET text = %s, ner_tags = %s WHERE doc_id = %s"
+    fetch_q = f"SELECT doc_id, doc_url FROM {table} WHERE text IS NULL LIMIT %s"
+    upd_q   = f"UPDATE {table} SET text = %s, ner_tags = %s WHERE doc_id = %s"
 
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:
-            session = requests.Session(); session.headers["UA"] = "topolegal"
             total = 0
             while True:
-                cur.execute(fetch, (batch,))
+                cur.execute(fetch_q, (batch,))
                 rows = cur.fetchall()
                 if not rows:
                     break
                 for doc_id, url in rows:
                     try:
-                        plain = clean(rtf_to_plain(fetch_rtf(url)))
+                        plain = link_tokens(clean(rtf_to_plain(fetch_rtf(url))))
                         tags_json = analyse(plain, nlp)
-                        cur.execute(update, (plain, tags_json, doc_id))
+                        cur.execute(upd_q, (plain, tags_json, doc_id))
                         total += 1
                     except Exception as e:
-                        logging.error("doc %s: %s", doc_id, e)
+                        logging.error("PG doc %s: %s", doc_id, e)
                 conn.commit(); logging.info("PG processed %d", total)
 
 # --------------------------- backend: BigQuery -----------------------------
@@ -154,7 +177,7 @@ def run_bigquery(table: str, batch: int, nlp):
             break
         for _, r in rows.iterrows():
             try:
-                plain = clean(rtf_to_plain(fetch_rtf(r.doc_url)))
+                plain = link_tokens(clean(rtf_to_plain(fetch_rtf(r.doc_url))))
                 tags_json = analyse(plain, nlp)
                 client.query(
                     f"""
@@ -179,7 +202,7 @@ def run_bigquery(table: str, batch: int, nlp):
 # --------------------------- backend: test mode ---------------------------
 
 def run_test(source: str, nlp, html_out: str | None):
-    plain = clean(rtf_to_plain(fetch_rtf(source)))
+    plain = link_tokens(clean(rtf_to_plain(fetch_rtf(source))))
     doc   = nlp(plain); doc.ents = filter_spans(doc.ents)
     print("Entities:\n" + "\n".join(f"{e.label_}\t{e.text}" for e in doc.ents))
     if html_out:
@@ -229,6 +252,7 @@ def main():
         run_bigquery(args.bq_table, args.batch, nlp)
     else:  # test
         run_test(args.source, nlp, args.html)
+
 
 if __name__ == "__main__":
     main()
