@@ -11,7 +11,7 @@ Article‑linker now recognises *any* code abbreviation (КПК, КК, ЦК, Ц�
 from __future__ import annotations
 import argparse, json, logging, html, unicodedata, pathlib, re
 from typing import Dict
-
+import os
 import ftfy, requests, spacy
 from dotenv import load_dotenv
 from spacy import displacy
@@ -218,43 +218,67 @@ def run_postgres(dsn: str, table: str, batch: int, nlp):
 
 # --------------------------- backend: BigQuery -----------------------------
 
-def run_bigquery(table: str, batch: int, nlp):
-    from google.cloud import bigquery
+from google.cloud import bigquery
+import logging
+
+DEST = "lab-test-project-1-305710-30eed237388b.court.sentences_only"   # new table
+SRC  = "lab-test-project-1-305710-30eed237388b.court.court_data"             # original
+
+def run_bigquery(batch: int, nlp):
     client = bigquery.Client()
     total  = 0
+
     while True:
+        # Pull the next batch of unprocessed rows
         rows = client.query(f"""
-            SELECT doc_id, doc_url FROM `{table}`
+            SELECT doc_id, doc_url
+            FROM `{SRC}`
             WHERE text IS NULL
             LIMIT {batch}
         """).result().to_dataframe()
+
         if rows.empty:
             break
+
         for _, r in rows.iterrows():
             try:
                 plain, links = annotate_links(clean(rtf_to_plain(fetch_rtf(r.doc_url))))
-                tags_json = analyse(plain, nlp)
+                tags_json    = analyse(plain, nlp)
+
+                # Stream the processed record into the destination table
+                client.insert_rows_json(
+                    DEST,
+                    [{
+                        "id":    r.doc_id,
+                        "text":  plain,
+                        "links": links,
+                        "tags":  tags_json,
+                    }],
+                    row_ids=[str(r.doc_id)]          # idempotent insert
+                )
+
+                # Optionally mark the source row as done so we never re-process it
                 client.query(
                     f"""
-                    UPDATE `{table}`
-                       SET text = @text,
-                           links = @links,
-                           ner_tags = @tags
+                    UPDATE `{SRC}`
+                       SET text = @text            -- keeps src table self-contained
                      WHERE doc_id = @id
                     """,
                     job_config=bigquery.QueryJobConfig(
                         query_parameters=[
                             bigquery.ScalarQueryParameter("text", "STRING", plain),
-                            bigquery.ScalarQueryParameter("links", "STRING", links),
-                            bigquery.ScalarQueryParameter("tags", "STRING", tags_json),
-                            bigquery.ScalarQueryParameter("id",   "STRING", r.doc_id),
+                            bigquery.ScalarQueryParameter("id",   "BIGNUMERIC", r.doc_id),
                         ]
                     ),
                 ).result()
+
                 total += 1
+
             except Exception as e:
                 logging.error("BQ doc %s: %s", r.doc_id, e)
-        logging.info("BQ processed %d", total)
+
+        logging.info("processed %d rows", total)
+
 
 # --------------------------- backend: test mode ---------------------------
 # 234 CK - text + pos
@@ -288,29 +312,48 @@ def main():
     ap = argparse.ArgumentParser("topolegal multipurpose NER runner")
     sub = ap.add_subparsers(dest="mode", required=True)
 
-    pg = sub.add_parser("postgres")
-    pg.add_argument("--dsn", required=True)
-    pg.add_argument("--table", required=True)
+    # ─────────── Postgres ───────────
+    pg = sub.add_parser("postgres", help="Process a PostgreSQL table")
+    pg.add_argument("--dsn",
+                    default=os.getenv("PG_DSN"),
+                    required=os.getenv("PG_DSN") is None,
+                    help="PostgreSQL DSN (falls back to PG_DSN)")
+    pg.add_argument("--table",
+                    default=os.getenv("PG_TABLE"),
+                    required=os.getenv("PG_TABLE") is None,
+                    help="Table name (falls back to PG_TABLE)")
     pg.add_argument("--batch", type=int, default=1000)
 
-    bq = sub.add_parser("bigquery")
-    bq.add_argument("--bq-table", required=True)
+    # ─────────── BigQuery ───────────
+    bq = sub.add_parser("bigquery", help="Process a BigQuery table")
+    bq.add_argument("--bq-table",
+                    default=os.getenv("BQ_TABLE"),
+                    required=os.getenv("BQ_TABLE") is None,
+                    help="project.dataset.table (falls back to BQ_TABLE)")
+    bq.add_argument("--gcp-project",
+                    default=os.getenv("GOOGLE_CLOUD_PROJECT"),
+                    help="GCP project id (falls back to GOOGLE_CLOUD_PROJECT)")
+    bq.add_argument("--gcp-key",
+                    default=os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),
+                    help="Path to service-account JSON key "
+                         "(falls back to GOOGLE_APPLICATION_CREDENTIALS)")
     bq.add_argument("--batch", type=int, default=1000)
 
+    # ─────────── Test server ───────────
     ts = sub.add_parser("test")
     ts.add_argument("--source", required=True, help="RTF/TXT path or URL")
-    ts.add_argument("--port", type=int, default=8000, help="local port (default 8000)")
+    ts.add_argument("--port", type=int, default=8000)
 
     ap.add_argument("--use-pretrained", action="store_true")
     args = ap.parse_args()
-
+    print(args)
     nlp = build_nlp(args.use_pretrained)
 
     if args.mode == "postgres":
-        # run_postgres(args.dsn, args.table, args.batch, nlp)
+        run_postgres(args.dsn, args.table, args.batch, nlp)
         raise NotImplementedError("Postgres backend kept unchanged in snippet")
     elif args.mode == "bigquery":
-        # run_bigquery(args.bq_table, args.batch, nlp)
+        run_bigquery(args.batch, nlp)
         raise NotImplementedError("BigQuery backend kept unchanged in snippet")
     else:  # test
         run_test(args.source, nlp, args.port)
