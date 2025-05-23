@@ -221,8 +221,8 @@ def run_postgres(dsn: str, table: str, batch: int, nlp):
 from google.cloud import bigquery
 import logging
 
-DEST = "lab-test-project-1-305710-30eed237388b.court.sentences_only"   # new table
-SRC  = "lab-test-project-1-305710-30eed237388b.court.court_data"             # original
+DEST = "lab-test-project-1-305710.court_data_2022.sentences_only"   # new table
+SRC  = "lab-test-project-1-305710.court_data_2022.document_data"             # original
 
 def run_bigquery(batch: int, nlp):
     client = bigquery.Client()
@@ -231,9 +231,13 @@ def run_bigquery(batch: int, nlp):
     while True:
         # Pull the next batch of unprocessed rows
         rows = client.query(f"""
-            SELECT doc_id, doc_url
-            FROM `{SRC}`
-            WHERE text IS NULL
+            SELECT  src.doc_id,
+                    src.doc_url,
+                    src.justice_kind    
+            FROM    `{SRC}`  AS src
+            LEFT JOIN `{DEST}` AS dst
+                   ON dst.doc_id = src.doc_id AND src.justice_kind = 2
+            WHERE dst.doc_id IS NULL                      -- not processed yet
             LIMIT {batch}
         """).result().to_dataframe()
 
@@ -243,34 +247,36 @@ def run_bigquery(batch: int, nlp):
         for _, r in rows.iterrows():
             try:
                 plain, links = annotate_links(clean(rtf_to_plain(fetch_rtf(r.doc_url))))
-                tags_json    = analyse(plain, nlp)
+                tags    = analyse(plain, nlp)
 
                 # Stream the processed record into the destination table
                 client.insert_rows_json(
                     DEST,
                     [{
-                        "id":    r.doc_id,
+                        "doc_id": r.doc_id,
                         "text":  plain,
                         "links": links,
-                        "tags":  tags_json,
+                        "tags":  tags,
                     }],
                     row_ids=[str(r.doc_id)]          # idempotent insert
                 )
 
                 # Optionally mark the source row as done so we never re-process it
-                client.query(
-                    f"""
-                    UPDATE `{SRC}`
-                       SET text = @text            -- keeps src table self-contained
-                     WHERE doc_id = @id
-                    """,
-                    job_config=bigquery.QueryJobConfig(
-                        query_parameters=[
-                            bigquery.ScalarQueryParameter("text", "STRING", plain),
-                            bigquery.ScalarQueryParameter("id",   "BIGNUMERIC", r.doc_id),
-                        ]
-                    ),
-                ).result()
+                # client.query(
+                #     f"""
+                #     UPDATE `{SRC}`
+                #        SET text = @text            -- keeps src table self-contained
+                #      WHERE doc_id = @id
+                #     """,
+                #     job_config=bigquery.QueryJobConfig(
+                #         query_parameters=[
+                #             bigquery.ScalarQueryParameter()
+                #             bigquery.ScalarQueryParameter("links", "STRING", links)
+                #             bigquery.ScalarQueryParameter("text", "STRING", plain),
+                #             bigquery.ScalarQueryParameter("doc_id",   "INTEGER", r.doc_id),
+                #         ]
+                #     ),
+                # ).result()
 
                 total += 1
 

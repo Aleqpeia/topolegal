@@ -5,7 +5,7 @@ description     = "Add your description here"
 requires-python = ">=3.12"
 dependencies = [
     "google-cloud==0.34.0",
-    "google-cloud-bigquery==3.32.0",
+    "google-cloud-bigquery[all]==3.32.0",
     "google-cloud-bigquery-storage>=2.24",
     "google-cloud-storage==3.1.0",
     "pandas>=2",
