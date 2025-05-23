@@ -10,7 +10,7 @@ Article‑linker now recognises *any* code abbreviation (КПК, КК, ЦК, Ц�
 """
 from __future__ import annotations
 import argparse, json, logging, html, unicodedata, pathlib, re
-from typing import Dict
+from typing import Dict, Counter
 import os
 import ftfy, requests, spacy
 from dotenv import load_dotenv
@@ -224,26 +224,31 @@ import logging
 DEST = "lab-test-project-1-305710.court_data_2022.sentences_only"   # new table
 SRC  = "lab-test-project-1-305710.court_data_2022.document_data"             # original
 
-def run_bigquery(batch: int, nlp):
-    client = bigquery.Client()
-    total  = 0
+def run_bigquery(src: str, dest: str, batch: int, nlp,
+                 project: str | None = None, key_path: str | None = None):
+    # honour CLI / .env overrides
+    if key_path:
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key_path
+    client = bigquery.Client(project=os.environ["GOOGLE_CLOUD_PROJECT"], location="us-central1")
 
+    total  = 0
     while True:
         # Pull the next batch of unprocessed rows
-        rows = client.query(f"""
+        sql = f"""
             SELECT  src.doc_id,
-                    src.doc_url,
-                    src.justice_kind    
+                    src.doc_url   
             FROM    `{SRC}`  AS src
             LEFT JOIN `{DEST}` AS dst
-                   ON dst.doc_id = src.doc_id AND src.justice_kind = 2
+                ON dst.doc_id = src.doc_id
             WHERE dst.doc_id IS NULL                      -- not processed yet
             LIMIT {batch}
-        """).result().to_dataframe()
+        """
+        job = client.query(sql)
+        logging.info("Batch job %s submitted", job.job_id)
+        rows = job.result().to_dataframe()
 
         if rows.empty:
             break
-
         for _, r in rows.iterrows():
             try:
                 plain, links = annotate_links(clean(rtf_to_plain(fetch_rtf(r.doc_url))))
@@ -255,7 +260,7 @@ def run_bigquery(batch: int, nlp):
                     [{
                         "doc_id": r.doc_id,
                         "text":  plain,
-                        "links": links,
+                        "links": json.dumps(links, ensure_ascii=False),
                         "tags":  tags,
                     }],
                     row_ids=[str(r.doc_id)]          # idempotent insert
@@ -264,14 +269,14 @@ def run_bigquery(batch: int, nlp):
                 # Optionally mark the source row as done so we never re-process it
                 # client.query(
                 #     f"""
-                #     UPDATE `{SRC}`
-                #        SET text = @text            -- keeps src table self-contained
-                #      WHERE doc_id = @id
+                #     UPDATE `{DEST}`
+                #        SET text = @text AND doc_id = @r.doc_id
+                #        WHERE doc_id is NULL
                 #     """,
                 #     job_config=bigquery.QueryJobConfig(
                 #         query_parameters=[
-                #             bigquery.ScalarQueryParameter()
-                #             bigquery.ScalarQueryParameter("links", "STRING", links)
+                #             bigquery.ScalarQueryParameter("tags", "STRING", tags),
+                #             bigquery.ScalarQueryParameter("links", "STRING", links),
                 #             bigquery.ScalarQueryParameter("text", "STRING", plain),
                 #             bigquery.ScalarQueryParameter("doc_id",   "INTEGER", r.doc_id),
                 #         ]
@@ -284,6 +289,9 @@ def run_bigquery(batch: int, nlp):
                 logging.error("BQ doc %s: %s", r.doc_id, e)
 
         logging.info("processed %d rows", total)
+        if total > 50:
+            client.close()
+            break
 
 
 # --------------------------- backend: test mode ---------------------------
@@ -359,8 +367,8 @@ def main():
         run_postgres(args.dsn, args.table, args.batch, nlp)
         raise NotImplementedError("Postgres backend kept unchanged in snippet")
     elif args.mode == "bigquery":
-        run_bigquery(args.batch, nlp)
-        raise NotImplementedError("BigQuery backend kept unchanged in snippet")
+        run_bigquery(SRC, DEST, args.batch, nlp)
+
     else:  # test
         run_test(args.source, nlp, args.port)
 
