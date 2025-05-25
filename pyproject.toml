@@ -28,5 +28,8 @@ dependencies = [
     "psycopg>=3.2.9",
     "requests>=2.32.3",
     "psycopg-binary>=3.2.9",
+    "jupyterlab-widgets (>=3.0.15,<4.0.0)",
+    "jupyterlab (>=4.4.2,<5.0.0)",
+    "beautifulsoup4 (>=4.13.4,<5.0.0)",
 ]
 
