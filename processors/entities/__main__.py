@@ -289,9 +289,7 @@ def run_bigquery(src: str, dest: str, batch: int, nlp,
                 logging.error("BQ doc %s: %s", r.doc_id, e)
 
         logging.info("processed %d rows", total)
-        if total > 50:
-            client.close()
-            break
+        
 
 
 # --------------------------- backend: test mode ---------------------------
