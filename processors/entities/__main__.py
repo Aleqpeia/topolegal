@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from spacy import displacy
 from spacy.util import filter_spans
 from striprtf.striprtf import rtf_to_text as striprtf_to_text
+from google.cloud import storage
 
 # ───────────────────────── regex helpers ───────────────────────────────────
 
@@ -181,6 +182,16 @@ def fetch_rtf(src: str) -> bytes:
         r = requests.get(src, timeout=_DEF_TIMEOUT)
         r.raise_for_status()
         return r.content
+    elif src.startswith("gs://"):
+        # Parse Google Cloud Storage URL: gs://bucket-name/path/to/file
+        gs_path = src[5:]  # Remove 'gs://' prefix
+        bucket_name, blob_name = gs_path.split('/', 1)
+        
+        # Initialize client and download blob
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+        return blob.download_as_bytes()
     return pathlib.Path(src).read_bytes()
 
 
@@ -251,7 +262,7 @@ def run_bigquery(src: str, dest: str, batch: int, nlp,
             break
         for _, r in rows.iterrows():
             try:
-                plain, links = annotate_links(clean(rtf_to_plain(fetch_rtf(r.doc_url))))
+                plain, links = annotate_links(clean(rtf_to_plain(fetch_rtf("gs://court_data_raw/criminal_batch/102383543.rtf"))))
                 tags    = analyse(plain, nlp)
 
                 # Stream the processed record into the destination table
@@ -300,7 +311,8 @@ def run_test(source: str, nlp, port: int):
     plain, links = annotate_links(clean(rtf_to_plain(fetch_rtf(source))))
     logging.info(plain, links)
     print(plain,links)
-    doc = nlp(plain); doc.ents = filter_spans(doc.ents)
+    doc = nlp(plain)
+    doc.ents = filter_spans(doc.ents)
 
     logging.info("Starting displaCy at http://127.0.0.1:%d — press Ctrl+C to stop", port)
     displacy.serve(doc, style="ent", page=True, host="127.0.0.1", port=port)
