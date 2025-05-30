@@ -1,0 +1,38 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: topolegal-process-batch
+  namespace: default
+spec:
+  schedule: "* * * * *"  # Every minute
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: topolegal-processor
+            image: us-central1-docker.pkg.dev/lab-test-project-1-305710/legal-processing/topolegal:1
+            command: ["python", "-m", "processors.entities", "--use-pretrained", "process_batch"]
+            env:
+            # Required environment variables for process_batch
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            # Optional: Specify a specific batch/partition to process
+            # - name: BATCH_NUMBER
+            #   value: "1"
+            resources:
+              requests:
+                memory: "1Gi"    # Increased memory for spaCy models
+                cpu: "500m"      # Increased CPU for NLP processing
+              limits:
+                memory: "2Gi"    # Increased limit for processing
+                cpu: "1000m"
+          restartPolicy: OnFailure
+          # Optional: Add node selector for better resource allocation
+          # nodeSelector:
+          #   workload-type: ml-processing
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid  # Prevent overlapping jobs to avoid processing same partition twice 

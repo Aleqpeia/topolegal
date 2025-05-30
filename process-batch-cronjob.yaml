@@ -1,0 +1,83 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: topolegal-process-batch
+  namespace: default
+  labels:
+    app: topolegal
+    component: batch-processor
+spec:
+  schedule: "* * * * *"  # Every minute
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid  # Prevent overlapping jobs to avoid processing same partition twice
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: topolegal
+            component: batch-processor
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534  # nobody user
+            fsGroup: 65534
+          containers:
+          - name: topolegal-processor
+            image: us-central1-docker.pkg.dev/lab-test-project-1-305710/legal-processing/topolegal:1
+            command: ["python", "-m", "processors.entities"]
+            args: ["--use-pretrained", "process_batch"]
+            env:
+            # Required environment variables for process_batch
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            - name: GOOGLE_CLOUD_PROJECT
+              value: "lab-test-project-1-305710"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/var/secrets/google/key.json"
+            # Optional: Specify a specific batch/partition to process
+            # - name: BATCH_NUMBER
+            #   value: "1"
+            volumeMounts:
+            - name: google-cloud-key
+              mountPath: /var/secrets/google
+              readOnly: true
+            resources:
+              requests:
+                memory: "1Gi"
+                cpu: "500m"
+                ephemeral-storage: "1Gi"
+              limits:
+                memory: "2Gi"
+                cpu: "1000m"
+                ephemeral-storage: "2Gi"
+            livenessProbe:
+              exec:
+                command:
+                - python
+                - -c
+                - "import processors.entities"
+              initialDelaySeconds: 30
+              periodSeconds: 60
+              timeoutSeconds: 10
+              failureThreshold: 3
+          volumes:
+          - name: google-cloud-key
+            secret:
+              secretName: google-cloud-key
+              items:
+              - key: key.json
+                path: key.json
+          # GKE-specific optimizations
+          nodeSelector:
+            cloud.google.com/gke-nodepool: default-pool  # Adjust as needed
+          tolerations:
+          - key: "kubernetes.io/arch"
+            operator: "Equal"
+            value: "amd64"
+            effect: "NoSchedule"
+  concurrencyPolicy: Forbid  # Prevent overlapping jobs to avoid processing same partition twice 

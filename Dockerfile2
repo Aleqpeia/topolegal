@@ -1,0 +1,33 @@
+FROM python:3.12.3-bullseye AS builder-image
+
+WORKDIR /app
+
+ENV PY_BIN=python
+
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    git \
+    cmake \
+    && rm -rf /var/lib/apt/lists/*
+
+
+COPY requirements.txt ./
+
+RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install spacy
+
+RUN python -m spacy download uk_core_news_sm \
+ && python -m spacy download uk_core_news_trf
+
+
+FROM python:3.12.3-slim
+
+WORKDIR /app
+
+ENV PYTHONPATH=.
+
+# Copy the built dependencies from the builder-image stage
+COPY --from=builder-image /usr/local/lib/python3.12/site-packages/ /usr/local/lib/python3.12/site-packages/
+COPY . .
+
+ENTRYPOINT ["python", "-m", "processors.entities", "--use-pretrained", "process_batch"]

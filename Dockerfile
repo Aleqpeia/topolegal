@@ -6,29 +6,23 @@ ARG PIP_NO_CACHE_DIR=1
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# system libs: pandoc, unrtf, build deps (gcc for spacy-transformers)
 RUN apt-get update -qq && apt-get install -y --no-install-recommends \
         pandoc unrtf gcc g++ make curl git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Download the latest installer
 ADD https://astral.sh/uv/install.sh /uv-installer.sh
 
-# Run the installer then remove it
 RUN sh /uv-installer.sh && rm /uv-installer.sh
 
-# Ensure the installed binary is on the `PATH`
 ENV PATH="/root/.local/bin/:$PATH"
-# optional: faster wheels for spacy-transformers / torch
 RUN pip install --upgrade pip
 
-# Copy project
 WORKDIR /src
 COPY . .
 
-# Install Python deps (PEP-517 build)
 RUN uv sync
 
+RUN pip install ftfy
 RUN pip install spacy
 # Download spaCy Ukrainian models (small & transformer)
 RUN python -m spacy download uk_core_news_sm \
@@ -46,9 +40,7 @@ COPY --from=build /src /app
 WORKDIR /app
 ENV PATH="/app/.venv/bin:$PATH"
 
-# copy pandoc + unrtf binaries from build stage
 COPY --from=build /usr/bin/pandoc /usr/bin/unrtf /usr/bin/
 
-# default command (override at run-time)
-ENTRYPOINT ["python", "-m", "processors.entities"]
+ENTRYPOINT ["python", "-m", "processors.entities", "--use-pretrained", "process_batch"]
 CMD ["--help"]

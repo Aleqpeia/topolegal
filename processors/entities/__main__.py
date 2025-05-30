@@ -18,6 +18,10 @@ from spacy import displacy
 from spacy.util import filter_spans
 from striprtf.striprtf import rtf_to_text as striprtf_to_text
 from google.cloud import storage
+import spacy.training
+from google.cloud import bigquery
+from google.oauth2 import service_account
+from google.auth import default
 
 # ───────────────────────── regex helpers ───────────────────────────────────
 
@@ -53,7 +57,7 @@ LAW_CODE_URLS: Dict[str, str] = {
 
 _DEF_TIMEOUT = (10, 30)
 
-# ───────────────────────── text cleaning  ─────────────────────────────────
+# ───────────────────────── text cleaning  ────────────────────────────────
 
 def clean(text: str) -> str:
     text = ftfy.fix_text(text)
@@ -162,17 +166,33 @@ RULE_COMPONENTS = [
     "doctype_component", "crime_component", "adress_component",
     "info_component", "number_component",
 ]
-LABELS = ["INFO", "DATE", "LOC" "ROLE", "DOCTYPE", "CRIME", "NUM"]
+LABELS = ["INFO", "DATE", "LOC", "ROLE", "DOCTYPE", "CRIME", "NUM"]
 
 def build_nlp(use_pretrained: bool):
     nlp = spacy.load("uk_core_news_trf") if use_pretrained else spacy.blank("uk")
     if not use_pretrained:
+        # Add required components for blank model
+        nlp.add_pipe("lemmatizer")
         ner = nlp.add_pipe("ner", last=False)
         for label in LABELS:
             ner.add_label(label)
     for comp in RULE_COMPONENTS:
         if comp not in nlp.pipe_names:
             nlp.add_pipe(comp, last=True)
+    
+    # Initialize the pipeline if using blank model
+    if not use_pretrained:
+        # Create proper training examples for initialization        
+        # Create sample training data
+        examples = []
+        # Create an empty example
+        doc = nlp.make_doc("")
+        example = spacy.training.Example.from_dict(doc, {})
+        examples.append(example)
+        
+        # Initialize the pipeline
+        nlp.initialize(lambda: examples)
+    
     return nlp
 
 # ───────────────────────── IO helpers  ────────────────────────────────────
@@ -200,6 +220,62 @@ def rtf_to_plain(data: bytes) -> str:
         return striprtf_to_text(data.decode("latin-1", errors="ignore"))
     except Exception:
         return ""
+
+# ───────────────────────── Google Cloud credentials helper ──────────────────
+
+def initialize_gcp_credentials(credentials_path: str = None, project_id: str = None, 
+                              additional_scopes: list = None):
+    """
+    Initialize Google Cloud credentials for BigQuery and Cloud Storage.
+    
+    Args:
+        credentials_path: Path to service account JSON file (optional)
+        project_id: GCP project ID (optional)
+        additional_scopes: Additional OAuth scopes beyond the default ones
+    
+    Returns:
+        tuple: (credentials, project_id)
+    
+    Raises:
+        ValueError: If project_id cannot be determined
+        Exception: If credentials initialization fails
+    """
+    try:
+        # Get credentials path and project from environment if not provided
+        creds_path = credentials_path or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        proj_id = project_id or os.environ.get("GOOGLE_CLOUD_PROJECT")
+        
+        if not proj_id:
+            raise ValueError("GOOGLE_CLOUD_PROJECT environment variable or project_id parameter is required")
+        
+        # Default scopes for BigQuery and Cloud Storage
+        default_scopes = [
+            'https://www.googleapis.com/auth/bigquery',
+            'https://www.googleapis.com/auth/cloud-platform',
+            'https://www.googleapis.com/auth/devstorage.read_write'
+        ]
+        
+        # Add any additional scopes
+        scopes = default_scopes + (additional_scopes or [])
+        
+        if creds_path and os.path.exists(creds_path):
+            # Load credentials from service account file
+            credentials = service_account.Credentials.from_service_account_file(
+                creds_path,
+                scopes=scopes
+            )
+            logging.info("Using service account credentials from: %s", creds_path)
+        else:
+            # Fallback to default credentials (useful for local development or GCE)
+            credentials, _ = default(scopes=scopes)
+            logging.info("Using default credentials (ADC or metadata service)")
+        
+        logging.info("Google Cloud credentials initialized successfully for project: %s", proj_id)
+        return credentials, proj_id
+        
+    except Exception as e:
+        logging.error("Failed to initialize Google Cloud credentials: %s", e)
+        raise
 
 # --------------------------- backend: PostgreSQL ---------------------------
 
@@ -229,9 +305,6 @@ def run_postgres(dsn: str, table: str, batch: int, nlp):
 
 # --------------------------- backend: BigQuery -----------------------------
 
-from google.cloud import bigquery
-import logging
-
 DEST = "lab-test-project-1-305710.court_data_2022.sentences_only"   # new table
 SRC  = "lab-test-project-1-305710.court_data_2022.document_data"             # original
 
@@ -240,8 +313,13 @@ def run_bigquery(src: str, dest: str, batch: int, nlp,
     # honour CLI / .env overrides
     if key_path:
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key_path
-    client = bigquery.Client(project=os.environ["GOOGLE_CLOUD_PROJECT"], location="us-central1")
-
+    
+    # Initialize Google Cloud credentials using helper function
+    credentials, project_id = initialize_gcp_credentials(project_id=project)
+    
+    # Initialize BigQuery client with explicit credentials
+    client = bigquery.Client()
+    
     total  = 0
     while True:
         # Pull the next batch of unprocessed rows
@@ -262,7 +340,7 @@ def run_bigquery(src: str, dest: str, batch: int, nlp,
             break
         for _, r in rows.iterrows():
             try:
-                plain, links = annotate_links(clean(rtf_to_plain(fetch_rtf("gs://court_data_raw/criminal_batch/102383543.rtf"))))
+                plain, links = annotate_links(clean(rtf_to_plain(fetch_rtf(r.doc_url))))
                 tags    = analyse(plain, nlp)
 
                 # Stream the processed record into the destination table
@@ -309,7 +387,7 @@ def run_bigquery(src: str, dest: str, batch: int, nlp,
 def run_test(source: str, nlp, port: int):
     """Serve a single annotated document on http://127.0.0.1:<port>."""
     plain, links = annotate_links(clean(rtf_to_plain(fetch_rtf(source))))
-    logging.info(plain, links)
+    logging.info("Plain text: %s, Links: %s", plain, links)
     print(plain,links)
     doc = nlp(plain)
     doc.ents = filter_spans(doc.ents)
@@ -328,12 +406,106 @@ def analyse(text: str, nlp):
 
 # ───────────────────────── CLI  ───────────────────────────────────────────
 
+def process_batch(nlp, batch: int = None):
+    # Initialize Google Cloud credentials using helper function
+    # credentials, project_id = initialize_gcp_credentials()
+    
+    # Initialize BigQuery client with explicit credentials
+    client = bigquery.Client()
+    
+    # Initialize Cloud Storage client with explicit credentials
+    storage_client = storage.Client()
+    
+    # Step 1: Get the latest partition position from the sentences_partitioned_v1 table (watermark)
+    watermark_sql = """
+        SELECT COALESCE(MAX(partitioning_index), 1) as max_partition
+        FROM `lab-test-project-1-305710.court_data_2022.sentences_partitioned_v1`
+    """
+    watermark_job = client.query(watermark_sql)
+    watermark_result = watermark_job.result().to_dataframe()
+    
+    # Get the watermark as integer
+    watermark = int(watermark_result['max_partition'].iloc[0])
+    logging.info("Current watermark: %d", watermark)
+    
+    # Step 2: Determine which partition to process
+    if batch is not None:
+        # Process specific partition number
+        target_partition = batch
+        logging.info("Processing specific partition: %d", target_partition)
+    else:
+        # Process next partition after watermark
+        target_partition = watermark + 1
+        logging.info("Processing next partition after watermark: %d", target_partition)
+    
+    # Step 3: Request data from document_data_partition_v1 for the target partition
+    partition_sql = f"""
+        SELECT COALESCE(doc_id, 0) as doc_id
+        FROM `lab-test-project-1-305710.court_data_2022.document_data_partition_v1`
+        WHERE partitioning_index = {target_partition}
+    """
+    
+    partition_job = client.query(partition_sql)
+    logging.info("Partition batch job %s submitted for partition %d", partition_job.job_id, target_partition)
+    partition_rows = partition_job.result().to_dataframe()
+    
+    if partition_rows.empty:
+        logging.info("No data found for partition position %d", target_partition)
+        return
+    
+    # Get the Cloud Storage bucket
+    bucket = storage_client.bucket("court_data_raw")
+    
+    total_processed = 0
+    
+    # Process each document ID
+    for _, row in partition_rows.iterrows():
+        doc_id = int(row['doc_id'])  # Convert to regular Python int for JSON serialization
+        
+        # Step 4: The result ID is the name of the file in cloud storage bucket
+        file_name = f"{doc_id}.rtf"
+        blob_path = f"criminal_batch/{file_name}"
+        
+        try:
+            # Get the blob from cloud storage
+            blob = bucket.blob(blob_path)
+            
+            # Download the RTF content
+            rtf_data = blob.download_as_bytes()
+            
+            # Step 5: Extract and process using the same logic as run_bigquery (around line 280)
+            # This includes: rtf_to_plain, clean, annotate_links, and analyse
+            plain, links = annotate_links(clean(rtf_to_plain(rtf_data)))
+            tags = analyse(plain, nlp)
+            
+            # Store the processed result in the destination table
+            client.insert_rows_json(
+                "lab-test-project-1-305710.court_data_2022.sentences_partitioned_v1",
+                [{
+                    "doc_id": doc_id,
+                    "text": plain,
+                    "links": json.dumps(links, ensure_ascii=False),
+                    "tags": tags,
+                    "partitioning_index": target_partition,
+                }],
+                row_ids=[str(doc_id)]  # idempotent insert
+            )
+            
+            total_processed += 1
+            logging.info("Processed document %s", doc_id)
+            
+        except Exception as e:
+            logging.error("Failed to process doc %s: %s", doc_id, e)
+    
+    logging.info("Batch processing completed. Processed %d documents from partition %d (watermark: %d)", 
+                 total_processed, target_partition, watermark)
 
 def main():
     load_dotenv()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     ap = argparse.ArgumentParser("topolegal multipurpose NER runner")
+    ap.add_argument("--use-pretrained", action="store_true", help="Use pretrained spaCy model instead of blank model")
     sub = ap.add_subparsers(dest="mode", required=True)
 
     # ─────────── Postgres ───────────
@@ -363,12 +535,23 @@ def main():
                          "(falls back to GOOGLE_APPLICATION_CREDENTIALS)")
     bq.add_argument("--batch", type=int, default=1000)
 
+    # ─────────── Process Batch ───────────
+    pb = sub.add_parser("process_batch", help="Process documents using partition-based watermarking")
+    pb.add_argument("--gcp-project",
+                    default=os.getenv("GOOGLE_CLOUD_PROJECT"),
+                    help="GCP project id (falls back to GOOGLE_CLOUD_PROJECT)")
+    pb.add_argument("--gcp-key",
+                    default=os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),
+                    help="Path to service-account JSON key "
+                         "(falls back to GOOGLE_APPLICATION_CREDENTIALS)")
+    pb.add_argument("--batch", type=int, 
+                    help="Specific partition number to process (if not provided, processes next after watermark)")
+
     # ─────────── Test server ───────────
     ts = sub.add_parser("test")
     ts.add_argument("--source", required=True, help="RTF/TXT path or URL")
     ts.add_argument("--port", type=int, default=8000)
 
-    ap.add_argument("--use-pretrained", action="store_true")
     args = ap.parse_args()
     print(args)
     nlp = build_nlp(args.use_pretrained)
@@ -378,6 +561,8 @@ def main():
         raise NotImplementedError("Postgres backend kept unchanged in snippet")
     elif args.mode == "bigquery":
         run_bigquery(SRC, DEST, args.batch, nlp)
+    elif args.mode == "process_batch":
+        process_batch(nlp, args.batch)
 
     else:  # test
         run_test(args.source, nlp, args.port)
