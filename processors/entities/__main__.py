@@ -419,7 +419,7 @@ def process_batch(nlp, batch: int = None):
     # Step 1: Get the latest partition position from the sentences_partitioned_v1 table (watermark)
     watermark_sql = """
         SELECT COALESCE(MAX(partitioning_index), 1) as max_partition
-        FROM `lab-test-project-1-305710.court_data_2022.sentences_partitioned_v1`
+        FROM `lab-test-project-1-305710.court_data_2022.sentences_partitioned_v2`
     """
     watermark_job = client.query(watermark_sql)
     watermark_result = watermark_job.result().to_dataframe()
@@ -441,7 +441,7 @@ def process_batch(nlp, batch: int = None):
     # Step 3: Request data from document_data_partition_v1 for the target partition
     partition_sql = f"""
         SELECT COALESCE(doc_id, 0) as doc_id
-        FROM `lab-test-project-1-305710.court_data_2022.document_data_partition_v1`
+        FROM `lab-test-project-1-305710.court_data_2022.document_data_partition_v2`
         WHERE partitioning_index = {target_partition}
     """
     
@@ -464,7 +464,7 @@ def process_batch(nlp, batch: int = None):
         
         # Step 4: The result ID is the name of the file in cloud storage bucket
         file_name = f"{doc_id}.rtf"
-        blob_path = f"criminal_batch/{file_name}"
+        blob_path = f"criminal_batch_v2/{file_name}"
         
         try:
             # Get the blob from cloud storage
@@ -480,7 +480,7 @@ def process_batch(nlp, batch: int = None):
             
             # Store the processed result in the destination table
             client.insert_rows_json(
-                "lab-test-project-1-305710.court_data_2022.sentences_partitioned_v1",
+                "lab-test-project-1-305710.court_data_2022.sentences_partitioned_v2",
                 [{
                     "doc_id": doc_id,
                     "text": plain,
