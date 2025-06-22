@@ -1,7 +1,8 @@
 from typing import Dict, List, Optional, Callable
 import spacy
 from .entities import BaseMatcherComponent
-from .graph_extraction import GraphExtractor, EventGraph
+from .graph_extraction import LegalGraphExtractor, LegalKnowledgeGraph
+
 
 class DocumentProcessor:
     def __init__(
@@ -25,7 +26,7 @@ class DocumentProcessor:
         if use_spacy:
             self.nlp = spacy.load("en_core_web_lg")
         
-        self.graph_extractor = GraphExtractor(model_name=model_name)
+        self.graph_extractor = LegalGraphExtractor(model_name=model_name)
         
     def process_text(self, text: str) -> Dict:
         """
@@ -59,7 +60,7 @@ class DocumentProcessor:
             "entities": entities
         }
     
-    async def extract_events(self, text: str, entities: List[Dict]) -> EventGraph:
+    async def extract_events(self, text: str, entities: List[Dict]) -> LegalKnowledgeGraph:
         """Extract events and their relationships"""
         return await self.graph_extractor.extract_events(text, entities)
 
@@ -67,6 +68,6 @@ class DocumentProcessor:
 __all__ = [
     'DocumentProcessor',
     'BaseMatcherComponent',
-    'GraphExtractor',
-    'EventGraph'
+    'LegalGraphExtractor',
+    'LegalKnowledgeGraph'
 ]

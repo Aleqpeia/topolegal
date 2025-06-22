@@ -1,123 +1,208 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from pydantic import BaseModel
 from langchain.prompts import PromptTemplate
-from langchain.chat_models import ChatOpenAI
+from langchain_community.chat_models import ChatOpenAI
 from langchain.chains import LLMChain
-from processors import DocumentProcessor
 
-class EventNode(BaseModel):
-    """Represents a node in the event graph"""
-    event_type: str
-    legal_reference: str  # Legal reference (e.g., "ч.2 ст.331 КПК України")
-    participants: List[Dict[str, str]]
-    attributes: Dict[str, str]
-    confidence: float
-
-class EventEdge(BaseModel):
-    """Represents an edge in the event graph"""
+class KnowledgeTriplet(BaseModel):
+    """Represents a knowledge graph triplet (source, relation, target)"""
     source: str
+    relation: str
     target: str
-    relation_type: str
-    legal_basis: Optional[str]  # Legal reference that establishes the relationship
-    confidence: float
+    legal_reference: Optional[str] = None  # Legal basis for this relationship
+    confidence: float = 0.0
 
-class EventGraph(BaseModel):
-    """Represents the complete event graph"""
-    nodes: List[EventNode]
-    edges: List[EventEdge]
+    def __str__(self) -> str:
+        return f"({self.source}, {self.relation}, {self.target})"
 
-class GraphExtractor:
+class LegalEntity(BaseModel):
+    """Enhanced entity with legal context"""
+    text: str
+    label: str  # NER label (PERSON, ORG, ROLE, etc.)
+    start: int
+    end: int
+    legal_role: Optional[str] = None  # Role in legal context (підозрюваний, суд, etc.)
+
+class LegalKnowledgeGraph(BaseModel):
+    """Knowledge graph represented as triplets with legal metadata"""
+    triplets: List[KnowledgeTriplet]
+    entities: List[LegalEntity]
+    legal_references: List[str]  # All legal references found in text
+
+    def get_triplets_by_legal_ref(self, legal_ref: str) -> List[KnowledgeTriplet]:
+        """Get all triplets associated with a specific legal reference"""
+        return [t for t in self.triplets if t.legal_reference == legal_ref]
+
+    def get_entity_relations(self, entity: str) -> List[KnowledgeTriplet]:
+        """Get all relations where entity appears as source or target"""
+        return [t for t in self.triplets if t.source == entity or t.target == entity]
+
+class LegalGraphExtractor:
     def __init__(self, model_name: str = "gpt-4", temperature: float = 0.0):
-        self.llm = ChatOpenAI(model_name=model_name, temperature=temperature)
+        self.llm = ChatOpenAI(model=model_name, temperature=temperature)
         self.prompt = PromptTemplate(
             input_variables=["text", "entities"],
-            template="""На основі наданого тексту та виявлених сутностей, визначте події та їх взаємозв'язки, прив'язуючи кожну подію до відповідного правового посилання.
+            template="""На основі наданого тексту та виявлених сутностей, створіть граф знань у форматі триплетів (джерело, відношення, ціль).
 
 Текст: {text}
 
 Виявлені сутності: {entities}
 
-Приклад аналізу судового документа:
-Текст: "Відповідно до положень ч.2 ст.331 КПК України, вирішення питання судом щодо запобіжного заходу відбувається в порядку, передбаченому главою 18 цього Кодексу. Згідно з ч.ч.1, 2 ст.181 КПК України, запобіжний захід у вигляді домашнього арешту полягає в забороні підозрюваному, обвинуваченому залишати житло цілодобово."
+Приклад аналізу:
+Текст: "Відповідно до положень ч.2 ст.331 КПК України, суд вирішує питання про запобіжний захід. Підозрюваному може бути призначено домашній арешт згідно з ч.1 ст.181 КПК України."
 
-Сутності: [
-    {{"text": "суд", "label": "ORG", "start": 50, "end": 54}},
-    {{"text": "підозрюваному", "label": "ROLE", "start": 120, "end": 133}},
-    {{"text": "обвинуваченому", "label": "ROLE", "start": 135, "end": 149}}
-]
+Очікувані триплети:
+1. (суд, вирішує_питання_про, запобіжний захід) - ч.2 ст.331 КПК України
+2. (підозрюваному, може_бути_призначено, домашній арешт) - ч.1 ст.181 КПК України
+3. (запобіжний захід, регулюється, ч.2 ст.331 КПК України)
+4. (домашній арешт, регулюється, ч.1 ст.181 КПК України)
+5. (суд, має_повноваження, призначення запобіжного заходу)
 
-Очікуваний результат:
+Формат виводу як JSON:
 {{
-    "nodes": [
-        {{
-            "event_type": "ВИРІШЕННЯ_ПИТАННЯ_ЗАПОБІЖНОГО_ЗАХОДУ",
-            "legal_reference": "ч.2 ст.331 КПК України",
-            "participants": [
-                {{"role": "суб'єкт", "entity": "суд"}}
-            ],
-            "attributes": {{
-                "порядок": "глава 18 КПК України"
-            }},
-            "confidence": 0.95
-        }},
-        {{
-            "event_type": "ЗАСТОСУВАННЯ_ДОМАШНЬОГО_АРЕШТУ",
-            "legal_reference": "ч.ч.1, 2 ст.181 КПК України",
-            "participants": [
-                {{"role": "суб'єкт", "entity": "підозрюваному"}},
-                {{"role": "суб'єкт", "entity": "обвинуваченому"}}
-            ],
-            "attributes": {{
-                "тип_обмеження": "заборона залишати житло цілодобово"
-            }},
-            "confidence": 0.95
-        }}
-    ],
-    "edges": [
-        {{
-            "source": "ВИРІШЕННЯ_ПИТАННЯ_ЗАПОБІЖНОГО_ЗАХОДУ",
-            "target": "ЗАСТОСУВАННЯ_ДОМАШНЬОГО_АРЕШТУ",
-            "relation_type": "ПРАВОВА_ПОСЛІДОВНІСТЬ",
-            "legal_basis": "ч.2 ст.331 КПК України",
-            "confidence": 0.95
-        }}
-    ]
-}}
-
-Будь ласка, визначте:
-1. Події (вузли) з їх типом, правовим посиланням, учасниками та атрибутами
-2. Взаємозв'язки (ребра) між подіями з вказанням правової підстави
-
-Формат виводу як JSON з наступною структурою:
-{{
-    "nodes": [
-        {{
-            "event_type": "string",
-            "legal_reference": "string",
-            "participants": [{{"role": "string", "entity": "string"}}],
-            "attributes": {{"key": "value"}},
-            "confidence": float
-        }}
-    ],
-    "edges": [
+    "triplets": [
         {{
             "source": "string",
+            "relation": "string", 
             "target": "string",
-            "relation_type": "string",
-            "legal_basis": "string",
+            "legal_reference": "string",
             "confidence": float
         }}
-    ]
+    ],
+    "legal_references": ["string"]
 }}
 
+Правила створення триплетів:
+1. Використовуйте конкретні сутності з тексту як джерела та цілі
+2. Відношення повинні відображати правові зв'язки (призначає, регулюється, підлягає, застосовується)
+3. Обов'язково вказуйте правове посилання для кожного триплету
+4. Створюйте додаткові триплети для зв'язків між правовими нормами та процедурами
+5. Використовуйте українські терміни у відношеннях
+
 Зосередьтеся на:
-1. Визначенні подій, пов'язаних з правовими посиланнями
-2. Встановленні зв'язків між подіями на основі правових норм
-3. Структуруванні подій для подальшої валідації через GNN модель"""
+- Процедурних відношеннях (хто що робить)
+- Правових основах (що чим регулюється)
+- Суб'єктно-об'єктних відношеннях у правовому процесі"""
         )
         self.chain = LLMChain(llm=self.llm, prompt=self.prompt)
 
-    async def extract_events(self, text: str, entities: List[Dict]) -> EventGraph:
-        """Extract events and their relationships from text and entities"""
+    async def extract_triplets(self, text: str, entities: List[Dict]) -> LegalKnowledgeGraph:
+        """Extract knowledge graph triplets from legal text and entities"""
+        # Convert entities to LegalEntity objects
+        legal_entities = [
+            LegalEntity(
+                text=e.get("text", ""),
+                label=e.get("label", ""),
+                start=e.get("start", 0),
+                end=e.get("end", 0),
+                legal_role=self._determine_legal_role(e.get("text", ""), e.get("label", ""))
+            ) for e in entities
+        ]
+
+        # Extract triplets using LLM
         result = await self.chain.arun(text=text, entities=str(entities))
-        return EventGraph.parse_raw(result) 
+
+        try:
+            import json
+            parsed_result = json.loads(result)
+
+            triplets = [
+                KnowledgeTriplet(**triplet_data)
+                for triplet_data in parsed_result.get("triplets", [])
+            ]
+
+            legal_references = parsed_result.get("legal_references", [])
+
+            return LegalKnowledgeGraph(
+                triplets=triplets,
+                entities=legal_entities,
+                legal_references=legal_references
+            )
+
+        except json.JSONDecodeError:
+            # Fallback: create empty graph
+            return LegalKnowledgeGraph(
+                triplets=[],
+                entities=legal_entities,
+                legal_references=[]
+            )
+
+    def _determine_legal_role(self, text: str, label: str) -> Optional[str]:
+        """Determine legal role based on entity text and NER label"""
+        legal_roles_map = {
+            "суд": "judicial_authority",
+            "підозрюваний": "suspect",
+            "обвинувачений": "accused",
+            "прокурор": "prosecutor",
+            "адвокат": "defense_attorney",
+            "слідчий": "investigator",
+            "потерпілий": "victim"
+        }
+
+        text_lower = text.lower()
+        for term, role in legal_roles_map.items():
+            if term in text_lower:
+                return role
+
+        return None
+
+    def validate_triplets(self, kg: LegalKnowledgeGraph) -> List[str]:
+        """Validate extracted triplets for legal consistency"""
+        issues = []
+
+        for triplet in kg.triplets:
+            # Check if legal reference is provided
+            if not triplet.legal_reference:
+                issues.append(f"Missing legal reference for: {triplet}")
+
+            # Check confidence threshold
+            if triplet.confidence < 0.5:
+                issues.append(f"Low confidence for: {triplet}")
+
+            # Check for empty relations
+            if not triplet.relation.strip():
+                issues.append(f"Empty relation in: {triplet}")
+
+        return issues
+
+    def export_to_networkx(self, kg: LegalKnowledgeGraph):
+        """Export knowledge graph to NetworkX format for analysis"""
+        try:
+            import networkx as nx
+
+            G = nx.DiGraph()
+
+            for triplet in kg.triplets:
+                G.add_edge(
+                    triplet.source,
+                    triplet.target,
+                    relation=triplet.relation,
+                    legal_reference=triplet.legal_reference,
+                    confidence=triplet.confidence
+                )
+
+            return G
+
+        except ImportError:
+            raise ImportError("NetworkX is required for graph export. Install with: pip install networkx")
+
+# Usage example
+async def process_legal_document(text: str, entities: List[Dict]) -> LegalKnowledgeGraph:
+    """Process a legal document and extract knowledge graph from pre-extracted entities"""
+    extractor = LegalGraphExtractor()
+    kg = await extractor.extract_triplets(text, entities)
+
+    # Validate results
+    issues = extractor.validate_triplets(kg)
+    if issues:
+        print("Validation issues found:")
+        for issue in issues:
+            print(f"- {issue}")
+
+    # Print extracted triplets
+    print(f"\nExtracted {len(kg.triplets)} triplets:")
+    for triplet in kg.triplets:
+        legal_ref = f" [{triplet.legal_reference}]" if triplet.legal_reference else ""
+        print(f"  {triplet}{legal_ref}")
+
+    return kg
