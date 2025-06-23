@@ -38,7 +38,7 @@ class LegalKnowledgeGraph(BaseModel):
         return [t for t in self.triplets if t.source == entity or t.target == entity]
 
 class LegalGraphExtractor:
-    def __init__(self, model_name: str = "gpt-4", temperature: float = 0.0):
+    def __init__(self, model_name: str = "gpt-4.1-nano", temperature: float = 0.0):
         self.llm = ChatOpenAI(model=model_name, temperature=temperature)
         self.prompt = PromptTemplate(
             input_variables=["text", "entities"],
