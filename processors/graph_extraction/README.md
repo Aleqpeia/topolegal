@@ -1,175 +1,274 @@
-# Knowledge Graph Extraction for Legal Documents
+# Legal Knowledge Graph Extraction and Visualization
 
-This module provides functionality to extract knowledge graphs from legal documents using LangChain and OpenAI's GPT models. **This module focuses solely on knowledge graph generation from pre-extracted entities - it does not perform entity extraction itself.**
-
-## Architecture
-
-This module follows the principle of **separation of concerns**:
-- **Entity Extraction**: Handled by the separate `processors.entities` module
-- **Knowledge Graph Extraction**: This module - generates triplets from text and pre-extracted entities
+This module provides comprehensive legal knowledge graph extraction and visualization capabilities using LangChain and NetworkX.
 
 ## Features
 
-- **Knowledge Graph Generation**: Create knowledge graph triplets (source, relation, target) from legal text and pre-extracted entities
-- **Legal Reference Tracking**: Track legal references and their relationships
-- **Multiple Input Formats**: Support for CSV files with pre-extracted entities
-- **LangChain Integration**: Uses LangChain for LLM interactions with OpenAI GPT models
+- **Knowledge Graph Extraction**: Extract legal triplets (source, relation, target) from text using pre-extracted entities
+- **Graph Visualization**: Create interactive visualizations of legal knowledge graphs
+- **Multiple Output Formats**: Export graphs as PNG images, GraphML, GML, and CSV
+- **Statistics Generation**: Comprehensive graph analysis and statistics
+- **Flexible Processing**: Support for individual documents, combined graphs, and person-specific subgraphs
 
 ## Installation
 
-1. Install the required dependencies:
+### Dependencies
+
 ```bash
-pip install langchain langchain-community openai pandas pydantic
+# Core dependencies
+pip install langchain-community openai pandas
+
+# Visualization dependencies
+pip install matplotlib seaborn networkx
 ```
 
-2. Set your OpenAI API key:
+### NixOS Setup
+
+If you're on NixOS and encounter shared library issues:
+
 ```bash
-export OPENAI_API_KEY="your-api-key-here"
+# Install required system libraries
+nix-env -iA nixpkgs.libstdcxx5 nixpkgs.gcc-unwrapped
+
+# Or add to your shell.nix
+{
+  buildInputs = with pkgs; [
+    libstdcxx5
+    gcc-unwrapped
+  ];
+}
 ```
 
 ## Usage
 
-### Basic Usage
+### 1. Basic Knowledge Graph Extraction
 
 ```python
 import asyncio
 from processors.graph_extraction import LegalGraphExtractor
 
-async def extract_knowledge_graph():
-    # Initialize the extractor
-    extractor = LegalGraphExtractor(model_name="gpt-4", temperature=0.0)
-    
-    # Legal text in Ukrainian
-    text = """
-    Відповідно до положень ч.2 ст.331 КПК України, суд вирішує питання про запобіжний захід. 
-    Підозрюваному може бути призначено домашній арешт згідно з ч.1 ст.181 КПК України.
-    """
-    
-    # Pre-extracted entities (from the entities module)
+async def extract_kg():
+    # Sample text and entities
+    text = "Суд вирішує питання про запобіжний захід згідно з ч.2 ст.331 КПК України."
     entities = [
-        {"text": "суд", "label": "COURT", "start": 0, "end": 3, "confidence": 0.9},
-        {"text": "підозрюваному", "label": "LEGAL_ROLE", "start": 0, "end": 12, "confidence": 0.8},
-        {"text": "ч.2 ст.331 КПК України", "label": "LEGAL_REF", "start": 0, "end": 20, "confidence": 0.9},
+        {"text": "суд", "label": "ORG", "start": 0, "end": 3},
+        {"text": "ч.2 ст.331 КПК України", "label": "LEGAL_REF", "start": 45, "end": 64}
     ]
     
     # Extract knowledge graph
-    knowledge_graph = await extractor.extract_triplets(text, entities)
+    extractor = LegalGraphExtractor()
+    kg = await extractor.extract_triplets(text, entities)
     
-    # Print results
-    for triplet in knowledge_graph.triplets:
-        print(f"({triplet.source}, {triplet.relation}, {triplet.target})")
+    print(f"Extracted {len(kg.triplets)} triplets")
+    for triplet in kg.triplets:
+        print(f"{triplet.source} --{triplet.relation}--> {triplet.target}")
 
-# Run the extraction
-asyncio.run(extract_knowledge_graph())
+asyncio.run(extract_kg())
 ```
 
-### Processing CSV Files with Pre-extracted Entities
-
-```bash
-python -m processors.graph_extraction processing_doc_links.csv --max-docs 10 --output results.json
-```
-
-The CSV file should have:
-- `text` column: The legal document text
-- `entities` column (optional): Pre-extracted entities as JSON string or list
-
-Example CSV format:
-```csv
-text,entities,doc_id
-"Відповідно до положень ч.2 ст.331 КПК України...",'[{"text":"суд","label":"COURT","start":0,"end":3}]',doc_001
-```
-
-### Integration with Entity Extraction Module
+### 2. Graph Visualization
 
 ```python
-# First, extract entities using the entities module
-from processors.entities import EntityExtractor
+from processors.graph_extraction import visualize_graphs
 
-entity_extractor = EntityExtractor()
-entities = entity_extractor.extract_entities(legal_text)
-
-# Then, extract knowledge graph using this module
-from processors.graph_extraction import LegalGraphExtractor
-
-graph_extractor = LegalGraphExtractor()
-knowledge_graph = await graph_extractor.extract_triplets(legal_text, entities)
+# Visualize results from JSON file
+visualize_graphs(
+    input_file="results.json",
+    output_dir="graphs/",
+    min_confidence=0.6,
+    layout='spring',
+    combined=True,
+    individual=True,
+    export=True,
+    stats=True
+)
 ```
 
-## Data Models
+### 3. Command Line Interface
 
-### KnowledgeTriplet
-Represents a knowledge graph triplet:
-- `source`: The source entity
-- `relation`: The relationship between entities
-- `target`: The target entity
-- `legal_reference`: Legal basis for the relationship
-- `confidence`: Confidence score (0.0-1.0)
+#### Process CSV and Extract Knowledge Graphs
 
-### LegalEntity
-Represents an entity with legal context:
-- `text`: The entity text
-- `label`: NER label (COURT, LEGAL_ROLE, etc.)
-- `start`: Start position in text
-- `end`: End position in text
-- `legal_role`: Role in legal context
+```bash
+# Basic processing
+python -m processors.graph_extraction.__main__ data.csv --max-docs 10
 
-### LegalKnowledgeGraph
-Contains the complete knowledge graph:
-- `triplets`: List of KnowledgeTriplet objects
-- `entities`: List of LegalEntity objects
-- `legal_references`: List of legal references found
+# With visualization
+python -m processors.graph_extraction.__main__ data.csv --max-docs 10 --visualize
 
-## Example Output
+# Advanced options
+python -m processors.graph_extraction.__main__ data.csv \
+  --max-docs 10 \
+  --visualize \
+  --graph-output custom_graphs/ \
+  --min-confidence 0.7 \
+  --layout hierarchical \
+  --combined \
+  --individual \
+  --export \
+  --stats
+```
 
+#### Visualize Existing Results
+
+```bash
+# Using the CLI function
+python -c "from processors.graph_extraction import run_visualizer_cli; run_visualizer_cli()" \
+  results.json --combined --export --stats
+
+# Or run the graph visualizer directly
+python processors/graph_extraction/graph.py results.json --combined --export
+```
+
+### 4. Integration with Main Workflow
+
+```python
+from processors.graph_extraction import LegalGraphExtractor, visualize_graphs
+from processors.entities import EntityExtractor  # Your entity extraction module
+
+async def process_document(text):
+    # Step 1: Extract entities
+    entity_extractor = EntityExtractor()
+    entities = await entity_extractor.extract_entities(text)
+    
+    # Step 2: Extract knowledge graph
+    kg_extractor = LegalGraphExtractor()
+    kg = await kg_extractor.extract_triplets(text, entities)
+    
+    return kg
+
+# Process multiple documents and visualize
+results = []
+for doc in documents:
+    kg = await process_document(doc['text'])
+    results.append({
+        'doc_id': doc['id'],
+        'knowledge_graph': kg.dict()
+    })
+
+# Save results
+import json
+with open('results.json', 'w') as f:
+    json.dump(results, f, indent=2)
+
+# Visualize
+visualize_graphs('results.json', 'graphs/', combined=True, export=True)
+```
+
+## Output Formats
+
+### 1. Graph Images (PNG)
+- Combined graph from all documents
+- Individual document graphs
+- Person-specific subgraphs
+- Color-coded by entity type and confidence levels
+
+### 2. Graph Data Files
+- **GraphML**: Preserves all attributes for network analysis tools
+- **GML**: Simple graph format
+- **CSV**: Edge and node lists for spreadsheet analysis
+
+### 3. Statistics (JSON)
 ```json
 {
-  "triplets": [
-    {
-      "source": "суд",
-      "relation": "вирішує_питання_про",
-      "target": "запобіжний захід",
-      "legal_reference": "ч.2 ст.331 КПК України",
-      "confidence": 0.9
-    },
-    {
-      "source": "підозрюваному",
-      "relation": "може_бути_призначено",
-      "target": "домашній арешт",
-      "legal_reference": "ч.1 ст.181 КПК України",
-      "confidence": 0.8
-    }
-  ],
-  "legal_references": [
-    "ч.2 ст.331 КПК України",
-    "ч.1 ст.181 КПК України"
-  ]
+  "basic_stats": {
+    "nodes": 25,
+    "edges": 45,
+    "density": 0.15,
+    "is_connected": false
+  },
+  "node_types": {
+    "PERSON": 10,
+    "COURT": 3,
+    "LEGAL_REF": 8,
+    "CRIME": 4
+  },
+  "confidence_distribution": {
+    "high (0.8+)": 20,
+    "medium (0.6-0.8)": 15,
+    "low (0.4-0.6)": 10
+  }
 }
 ```
 
 ## Configuration
 
 ### Environment Variables
-- `OPENAI_API_KEY`: Your OpenAI API key (required)
 
-### Model Parameters
-- `model_name`: GPT model to use (default: "gpt-4")
-- `temperature`: Model temperature (default: 0.0 for deterministic output)
+```bash
+export OPENAI_API_KEY="your-openai-api-key"
+```
 
-## Workflow
+### Model Configuration
 
-1. **Entity Extraction**: Use `processors.entities` module to extract entities from legal documents
-2. **Knowledge Graph Extraction**: Use this module to generate knowledge graph triplets from text and entities
-3. **Analysis**: Analyze the resulting knowledge graph for legal insights
+```python
+# Custom model settings
+extractor = LegalGraphExtractor(
+    model_name="gpt-4",  # or "gpt-3.5-turbo"
+    temperature=0.1      # Lower for more consistent results
+)
+```
 
-## Dependencies
+### Visualization Options
 
-- `langchain>=0.3`
-- `langchain-community>=0.3`
-- `openai>=1.0.0`
-- `pandas>=2.0.0`
-- `pydantic>=2.0.0`
+- **Layouts**: `spring`, `circular`, `hierarchical`
+- **Confidence Thresholds**: Filter edges by confidence level
+- **Node Types**: Color-coded by entity type (PERSON, COURT, CRIME, etc.)
+- **Edge Styling**: Thickness based on confidence levels
 
-## Related Modules
+## Troubleshooting
 
-- `processors.entities`: Entity extraction from legal documents
-- `processors.graph_extraction`: Knowledge graph generation (this module) 
+### Common Issues
+
+1. **Missing Dependencies**
+   ```bash
+   pip install matplotlib seaborn networkx
+   ```
+
+2. **NixOS Library Issues**
+   ```bash
+   # Install missing libraries
+   nix-env -iA nixpkgs.libstdcxx5
+   ```
+
+3. **OpenAI API Errors**
+   - Check your API key is set: `echo $OPENAI_API_KEY`
+   - Verify API key has sufficient credits
+   - Check rate limits
+
+4. **Memory Issues with Large Graphs**
+   - Reduce `max-docs` parameter
+   - Increase `min-confidence` threshold
+   - Use `--individual` instead of `--combined`
+
+### Performance Tips
+
+- Use `--max-docs` to limit processing for testing
+- Set higher `min-confidence` to reduce noise
+- Use `--delay` to respect API rate limits
+- Process in batches for large datasets
+
+## Example Workflow
+
+1. **Prepare Data**: CSV with `text` and `entities` columns
+2. **Extract Knowledge Graphs**: Run the extraction script
+3. **Visualize Results**: Generate graphs and statistics
+4. **Analyze**: Use exported data for further analysis
+
+```bash
+# Complete workflow example
+python -m processors.graph_extraction.__main__ legal_docs.csv \
+  --max-docs 50 \
+  --visualize \
+  --combined \
+  --export \
+  --stats \
+  --graph-output analysis_results/
+```
+
+This will create:
+- `results.json`: Extracted knowledge graphs
+- `analysis_results/combined_graph_conf_0.6.png`: Main visualization
+- `analysis_results/combined_graph_conf_0.6.graphml`: Network analysis file
+- `analysis_results/combined_graph_stats_conf_0.6.json`: Statistics
+- `analysis_results/combined_graph_conf_0.6_edges.csv`: Edge list
+- `analysis_results/combined_graph_conf_0.6_nodes.csv`: Node list 

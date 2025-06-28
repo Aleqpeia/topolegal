@@ -3,6 +3,11 @@ from pydantic import BaseModel
 from langchain.prompts import PromptTemplate
 from langchain_community.chat_models import ChatOpenAI
 from langchain.chains import LLMChain
+import json
+import logging
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 class KnowledgeTriplet(BaseModel):
     """Represents a knowledge graph triplet (source, relation, target)"""
@@ -38,7 +43,7 @@ class LegalKnowledgeGraph(BaseModel):
         return [t for t in self.triplets if t.source == entity or t.target == entity]
 
 class LegalGraphExtractor:
-    def __init__(self, model_name: str = "gpt-4.1-nano", temperature: float = 0.0):
+    def __init__(self, model_name: str = "gpt-4.1-nano", temperature: float = 5.0):
         self.llm = ChatOpenAI(model=model_name, temperature=temperature)
         self.prompt = PromptTemplate(
             input_variables=["text", "entities"],
@@ -206,3 +211,210 @@ async def process_legal_document(text: str, entities: List[Dict]) -> LegalKnowle
         print(f"  {triplet}{legal_ref}")
 
     return kg
+
+def visualize_graphs(input_file: str, output_dir: str = "graphs/", 
+                    min_confidence: float = 0.6,
+                    layout: str = 'spring',
+                    combined: bool = True,
+                    individual: bool = False,
+                    subgraphs: bool = False,
+                    export: bool = False,
+                    stats: bool = False):
+    """
+    Visualize knowledge graphs from JSON results
+    
+    Args:
+        input_file: JSON file with knowledge graph results
+        output_dir: Output directory for graphs
+        min_confidence: Minimum confidence for edges
+        layout: Graph layout ('spring', 'circular', 'hierarchical')
+        combined: Create combined graph from all documents
+        individual: Create individual graphs for each document
+        subgraphs: Create subgraphs for each person
+        export: Export graph data in multiple formats
+        stats: Generate graph statistics
+    """
+    try:
+        # Import the visualizer
+        from .graph import LegalGraphVisualizer
+        
+        # Create output directory
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        # Load and process results
+        visualizer = LegalGraphVisualizer()
+        results = visualizer.load_results(input_file)
+        
+        if not results:
+            logger.error("No valid results to process")
+            return
+        
+        logger.info(f"Loaded {len(results)} documents")
+        
+        # Create combined graph
+        if combined or not (individual or subgraphs):
+            logger.info("Creating combined graph...")
+            combined_graph = visualizer.create_combined_graph(results, min_confidence)
+            
+            if combined_graph.number_of_nodes() > 0:
+                # Visualize
+                output_file = output_path / f"combined_graph_conf_{min_confidence}.png"
+                visualizer.visualize_graph(combined_graph, str(output_file), layout)
+                
+                # Export data
+                if export:
+                    export_file = output_path / f"combined_graph_conf_{min_confidence}"
+                    visualizer.export_graph_data(combined_graph, str(export_file))
+                
+                # Generate stats
+                if stats:
+                    stats_data = visualizer.generate_graph_statistics(combined_graph)
+                    stats_file = output_path / f"combined_graph_stats_conf_{min_confidence}.json"
+                    with open(stats_file, 'w', encoding='utf-8') as f:
+                        json.dump(stats_data, f, indent=2, ensure_ascii=False)
+                    logger.info(f"Statistics saved to {stats_file}")
+                
+                # Create person subgraphs
+                if subgraphs:
+                    subgraph_dir = output_path / "person_subgraphs"
+                    subgraph_dir.mkdir(exist_ok=True)
+                    visualizer.create_subgraphs_by_person(combined_graph, str(subgraph_dir))
+        
+        # Create individual graphs
+        if individual:
+            logger.info("Creating individual document graphs...")
+            individual_dir = output_path / "individual_docs"
+            individual_dir.mkdir(exist_ok=True)
+            
+            for doc_data in results:
+                if 'error' not in doc_data:
+                    doc_id = doc_data.get('doc_id', 'unknown')
+                    doc_graph = visualizer.create_graph_from_document(doc_data, min_confidence)
+                    
+                    if doc_graph.number_of_edges() > 0:
+                        output_file = individual_dir / f"doc_{doc_id}_graph.png"
+                        visualizer.visualize_graph(doc_graph, str(output_file), layout, figsize=(12, 8))
+        
+        logger.info(f"Graph visualization complete. Results saved to {output_dir}")
+        
+    except ImportError as e:
+        logger.error(f"Missing dependencies: {e}")
+        logger.info("Install required packages: pip install matplotlib seaborn networkx")
+    except Exception as e:
+        logger.error(f"Error during visualization: {e}")
+
+def run_visualizer_cli():
+    """Run the graph visualizer from command line"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Visualize legal knowledge graphs")
+    parser.add_argument("input_file", help="JSON file with knowledge graph results")
+    parser.add_argument("--output", "-o", default="graphs/", help="Output directory")
+    parser.add_argument("--min-confidence", "-c", type=float, default=0.6, 
+                       help="Minimum confidence for edges")
+    parser.add_argument("--layout", choices=['spring', 'circular', 'hierarchical'], 
+                       default='spring', help="Graph layout")
+    parser.add_argument("--combined", action="store_true", 
+                       help="Create combined graph from all documents")
+    parser.add_argument("--individual", action="store_true", 
+                       help="Create individual graphs for each document")
+    parser.add_argument("--subgraphs", action="store_true", 
+                       help="Create subgraphs for each person")
+    parser.add_argument("--export", action="store_true", 
+                       help="Export graph data in multiple formats")
+    parser.add_argument("--stats", action="store_true", 
+                       help="Generate graph statistics")
+    
+    args = parser.parse_args()
+    
+    # Set defaults if no specific options chosen
+    if not (args.combined or args.individual or args.subgraphs):
+        args.combined = True
+    
+    visualize_graphs(
+        input_file=args.input_file,
+        output_dir=args.output,
+        min_confidence=args.min_confidence,
+        layout=args.layout,
+        combined=args.combined,
+        individual=args.individual,
+        subgraphs=args.subgraphs,
+        export=args.export,
+        stats=args.stats
+    )
+
+def filter_zero_triplets(results_file: str, output_file: Optional[str] = None, min_triplets: int = 1):
+    """
+    Filter out documents with zero or fewer triplets than specified threshold
+    
+    Args:
+        results_file: Path to JSON file with results
+        output_file: Path to save filtered results (if None, overwrites original)
+        min_triplets: Minimum number of triplets required (default: 1)
+    
+    Returns:
+        Number of documents removed
+    """
+    import json
+    
+    # Load results
+    with open(results_file, 'r', encoding='utf-8') as f:
+        results = json.load(f)
+    
+    original_count = len(results)
+    
+    # Filter results
+    filtered_results = [
+        result for result in results 
+        if result.get('triplets_count', 0) >= min_triplets
+    ]
+    
+    removed_count = original_count - len(filtered_results)
+    
+    # Save filtered results
+    output_path = output_file if output_file is not None else results_file
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(filtered_results, f, indent=2, ensure_ascii=False)
+    
+    logger.info(f"Filtered {removed_count} documents with < {min_triplets} triplets")
+    logger.info(f"Remaining: {len(filtered_results)} documents")
+    logger.info(f"Saved to: {output_path}")
+    
+    return removed_count
+
+def analyze_results(results_file: str):
+    """
+    Analyze results and show statistics about triplet distribution
+    
+    Args:
+        results_file: Path to JSON file with results
+    """
+    import json
+    
+    with open(results_file, 'r', encoding='utf-8') as f:
+        results = json.load(f)
+    
+    total_docs = len(results)
+    docs_with_triplets = len([r for r in results if r.get('triplets_count', 0) > 0])
+    docs_without_triplets = total_docs - docs_with_triplets
+    
+    triplet_counts = [r.get('triplets_count', 0) for r in results]
+    total_triplets = sum(triplet_counts)
+    avg_triplets = total_triplets / total_docs if total_docs > 0 else 0
+    
+    print(f"""
+Results Analysis:
+================
+Total documents: {total_docs}
+Documents with triplets: {docs_with_triplets} ({docs_with_triplets/total_docs*100:.1f}%)
+Documents without triplets: {docs_without_triplets} ({docs_without_triplets/total_docs*100:.1f}%)
+Total triplets: {total_triplets}
+Average triplets per document: {avg_triplets:.2f}
+
+Triplet distribution:
+- 0 triplets: {docs_without_triplets} docs
+- 1-5 triplets: {len([c for c in triplet_counts if 1 <= c <= 5])} docs
+- 6-10 triplets: {len([c for c in triplet_counts if 6 <= c <= 10])} docs
+- 11+ triplets: {len([c for c in triplet_counts if c > 10])} docs
+    """)
