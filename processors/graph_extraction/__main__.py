@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Simplified script to process legal documents from CSV
+Simplified script to process legal documents from CSV or BigQuery
 Run with: python __main__.py processing_doc_links.csv --max-docs 10
+Or: python __main__.py --bigquery --bq-table lab-test-project-1-305710.court_data_2022.processing_doc_links
 """
 
 import asyncio
@@ -58,7 +59,7 @@ class LegalKnowledgeGraph(BaseModel):
 
 
 class LegalGraphExtractor:
-    def __init__(self, model_name: str = "gpt-4.1-mini", temperature: float = 0.8, debug_output: str = None):
+    def __init__(self, model_name: str = "gpt-4.1-mini", temperature: float = 0.8, debug_output: Optional[str] = None):
         if not os.getenv("OPENAI_API_KEY"):
             logger.error("OPENAI_API_KEY not set!")
             sys.exit(1)
@@ -204,6 +205,9 @@ class LegalGraphExtractor:
             import json
             from pathlib import Path
             
+            if self.debug_output is None:
+                return
+                
             debug_dir = Path(self.debug_output)
             debug_dir.mkdir(parents=True, exist_ok=True)
             
@@ -266,9 +270,192 @@ def visualize_results(results_file: str, output_dir: str = "graphs/", **kwargs):
         logger.error(f"Error during visualization: {e}")
 
 
+# --------------------------- BigQuery backend -----------------------------
+
+def run_bigquery(table_id: str, batch: int, extractor: LegalGraphExtractor,
+                 project: Optional[str] = None, key_path: Optional[str] = None,
+                 update_existing: bool = False):
+    """Process documents from BigQuery table and update with triplet extraction results"""
+    try:
+        from google.cloud import bigquery
+    except ImportError:
+        logger.error("BigQuery not available. Install: pip install google-cloud-bigquery")
+        return
+
+    # Honour CLI / .env overrides
+    if key_path:
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key_path
+    if project:
+        os.environ["GOOGLE_CLOUD_PROJECT"] = project
+    
+    client = bigquery.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT"), location="us-central1")
+
+    total = 0
+    while True:
+        # Pull the next batch of unprocessed rows
+        if update_existing:
+            # Update existing records that don't have triplets or have 0 triplets
+            sql = f"""
+                SELECT  doc_id,
+                        text,
+                        tags,
+                        triplets_count
+                FROM    `{table_id}`
+                WHERE   (triplets_count IS NULL OR triplets_count = 0)
+                    AND text IS NOT NULL
+                    AND tags IS NOT NULL
+                    AND LENGTH(text) > 10
+                LIMIT   {batch}
+            """
+        else:
+            # Process all records that don't have triplets
+            sql = f"""
+                SELECT  doc_id,
+                        text,
+                        tags,
+                        triplets_count
+                FROM    `{table_id}`
+                WHERE   triplets_count IS NULL
+                    AND text IS NOT NULL
+                    AND tags IS NOT NULL
+                    AND LENGTH(text) > 10
+                LIMIT   {batch}
+            """
+            
+        job = client.query(sql)
+        logger.info("Batch job %s submitted", job.job_id)
+        rows = job.result().to_dataframe()
+
+        if rows.empty:
+            logger.info("No more documents to process")
+            break
+            
+        for _, row in rows.iterrows():
+            try:
+                doc_id = str(row.doc_id)
+                text = str(row.text)
+                
+                # Parse entities from tags column
+                entities = []
+                if hasattr(row, 'tags') and pd.notna(row.tags):
+                    try:
+                        entities = json.loads(str(row.tags))
+                    except:
+                        logger.warning(f"Could not parse entities for doc {doc_id}")
+
+                # Process document
+                result = asyncio.run(process_document(text, entities, doc_id, extractor))
+                
+                # Update the existing table with triplet results
+                update_sql = f"""
+                    UPDATE `{table_id}`
+                    SET triplets = @triplets,
+                        triplets_count = @triplets_count,
+                        processing_timestamp = @processing_timestamp
+                    WHERE doc_id = @doc_id
+                """
+                
+                # Prepare the update data
+                triplets_json = json.dumps(result.get('knowledge_graph', {}).get('triplets', []), ensure_ascii=False)
+                triplets_count = result.get('triplets_count', 0)
+                processing_timestamp = result.get('processing_timestamp', datetime.now().isoformat())
+                
+                # Execute the update
+                job_config = bigquery.QueryJobConfig(
+                    query_parameters=[
+                        bigquery.ScalarQueryParameter("triplets", "STRING", triplets_json),
+                        bigquery.ScalarQueryParameter("triplets_count", "INTEGER", triplets_count),
+                        bigquery.ScalarQueryParameter("processing_timestamp", "TIMESTAMP", processing_timestamp),
+                        bigquery.ScalarQueryParameter("doc_id", "STRING", doc_id),
+                    ]
+                )
+                
+                update_job = client.query(update_sql, job_config=job_config)
+                update_job.result()  # Wait for the update to complete
+
+                total += 1
+                logger.info(f"Processed doc {doc_id}: {triplets_count} triplets")
+
+            except Exception as e:
+                logger.error(f"BQ doc {row.doc_id}: {e}")
+
+        logger.info("Processed %d rows in this batch", total)
+
+
+def check_bigquery_schema(table_id: str):
+    """Check if the BigQuery table has the required columns"""
+    try:
+        from google.cloud import bigquery
+        
+        client = bigquery.Client()
+        table = client.get_table(table_id)
+        columns = [field.name for field in table.schema]
+        
+        required_columns = ['doc_id', 'text', 'tags']
+        optional_columns = ['triplets', 'triplets_count', 'processing_timestamp']
+        
+        missing_required = [col for col in required_columns if col not in columns]
+        existing_optional = [col for col in optional_columns if col in columns]
+        
+        logger.info(f"Table schema check for {table_id}:")
+        logger.info(f"Required columns: {required_columns}")
+        logger.info(f"Optional columns: {optional_columns}")
+        logger.info(f"Missing required: {missing_required}")
+        logger.info(f"Existing optional: {existing_optional}")
+        
+        if missing_required:
+            logger.error(f"Missing required columns: {missing_required}")
+            return False
+            
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to check table schema: {e}")
+        return False
+
+
+def get_bigquery_stats(table_id: str):
+    """Get statistics about triplet processing status"""
+    try:
+        from google.cloud import bigquery
+        
+        client = bigquery.Client()
+        
+        sql = f"""
+        SELECT 
+            COUNT(*) as total_docs,
+            COUNTIF(triplets_count IS NULL) as docs_without_triplets,
+            COUNTIF(triplets_count = 0) as docs_with_zero_triplets,
+            COUNTIF(triplets_count > 0) as docs_with_triplets,
+            AVG(triplets_count) as avg_triplets,
+            MAX(triplets_count) as max_triplets
+        FROM `{table_id}`
+        WHERE text IS NOT NULL
+        """
+        
+        job = client.query(sql)
+        results = job.result().to_dataframe()
+        
+        if not results.empty:
+            row = results.iloc[0]
+            logger.info(f"""
+Processing Statistics:
+====================
+Total documents: {row.total_docs}
+Documents without triplets: {row.docs_without_triplets}
+Documents with zero triplets: {row.docs_with_zero_triplets}
+Documents with triplets: {row.docs_with_triplets}
+Average triplets per doc: {row.avg_triplets:.2f}
+Maximum triplets in a doc: {row.max_triplets}
+            """)
+        
+    except Exception as e:
+        logger.error(f"Failed to get processing stats: {e}")
+
+
 async def main():
-    parser = argparse.ArgumentParser(description="Simple legal knowledge graph extraction")
-    parser.add_argument("csv_file", help="CSV file with legal documents")
+    parser = argparse.ArgumentParser(description="Legal knowledge graph extraction from CSV or BigQuery")
+    parser.add_argument("csv_file", nargs='?', help="CSV file with legal documents")
     parser.add_argument("--output", "-o", default="results.json", help="Output file")
     parser.add_argument("--max-docs", "-m", type=int, default=None, help="Max documents")
     parser.add_argument("--delay", "-d", type=float, default=2.0, help="API delay")
@@ -287,6 +474,16 @@ async def main():
     parser.add_argument("--keep-zero-triplets", action="store_true", 
                        help="Keep documents with zero triplets (overrides --filter-zero-triplets)")
     parser.add_argument("--debug-output", help="Directory to save debug LLM outputs")
+    
+    # BigQuery options
+    parser.add_argument("--bigquery", action="store_true", help="Use BigQuery backend")
+    parser.add_argument("--bq-table", help="BigQuery table ID (project.dataset.table)")
+    parser.add_argument("--update-existing", action="store_true", help="Update existing records with triplets_count = 0")
+    parser.add_argument("--gcp-project", help="GCP project id")
+    parser.add_argument("--gcp-key", help="Path to service-account JSON key")
+    parser.add_argument("--batch", type=int, default=1000, help="Batch size for BigQuery processing")
+    parser.add_argument("--check-schema", action="store_true", help="Check BigQuery table schema")
+    parser.add_argument("--show-stats", action="store_true", help="Show BigQuery processing statistics")
 
     args = parser.parse_args()
 
@@ -295,6 +492,39 @@ async def main():
         filter_zero_triplets = False
     else:
         filter_zero_triplets = args.filter_zero_triplets
+
+    # BigQuery processing
+    if args.bigquery:
+        if not args.bq_table:
+            logger.error("BigQuery mode requires --bq-table")
+            return
+            
+        # Check schema if requested
+        if args.check_schema:
+            if not check_bigquery_schema(args.bq_table):
+                logger.error("Table schema check failed. Please ensure required columns exist.")
+                return
+        
+        # Show stats if requested
+        if args.show_stats:
+            get_bigquery_stats(args.bq_table)
+            return
+            
+        extractor = LegalGraphExtractor(debug_output=args.debug_output)
+        run_bigquery(
+            table_id=args.bq_table,
+            batch=args.batch,
+            extractor=extractor,
+            project=args.gcp_project,
+            key_path=args.gcp_key,
+            update_existing=args.update_existing
+        )
+        return
+
+    # CSV processing (existing functionality)
+    if not args.csv_file:
+        logger.error("CSV file required for non-BigQuery mode")
+        return
 
     if not Path(args.csv_file).exists():
         logger.error(f"File not found: {args.csv_file}")
@@ -318,10 +548,10 @@ async def main():
     results = []
 
     for idx, row in df.iterrows():
-        logger.info(f"Processing {int(idx) + 1}/{len(df)}")
+        logger.info(f"Processing {idx + 1}/{len(df)}")
 
         text = str(row['text']).strip()
-        doc_id = str(row.get('doc_id', f"doc_{int(idx)}"))
+        doc_id = str(row.get('doc_id', f"doc_{idx}"))
 
         # Get entities from 'tags' column if available
         entities = []
@@ -337,10 +567,10 @@ async def main():
         if filter_zero_triplets and result.get('triplets_count', 0) == 0:
             logger.info(f"Skipping doc {doc_id} - no triplets extracted")
             continue
-            
+
         results.append(result)
 
-        if int(idx) + 1 < len(df):
+        if idx + 1 < len(df):
             await asyncio.sleep(args.delay)
 
     # Save results
@@ -377,6 +607,10 @@ async def main():
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
-        print("Usage: python __main__.py data.csv --max-docs 10 --visualize")
+        print("Usage examples:")
+        print("  CSV mode: python __main__.py data.csv --max-docs 10 --visualize")
+        print("  BigQuery mode: python __main__.py --bigquery --bq-table lab-test-project-1-305710.court_data_2022.processing_doc_links")
+        print("  Check schema: python __main__.py --bigquery --bq-table lab-test-project-1-305710.court_data_2022.processing_doc_links --check-schema")
+        print("  Show stats: python __main__.py --bigquery --bq-table lab-test-project-1-305710.court_data_2022.processing_doc_links --show-stats")
     else:
         asyncio.run(main())
