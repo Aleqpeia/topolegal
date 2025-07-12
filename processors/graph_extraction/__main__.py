@@ -21,19 +21,27 @@ import sys
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Check for LangChain
+# Check for LangChain - try new packages first, then fallback
 try:
-    from langchain_community.chat_models import ChatOpenAI
+    from langchain_openai import ChatOpenAI
     from langchain.prompts import PromptTemplate
-    from langchain.chains import LLMChain
+    from langchain_core.runnables import RunnablePassthrough
+    logger.info("Using langchain_openai for ChatOpenAI")
 except ImportError:
     try:
-        from langchain.chat_models import ChatOpenAI
+        from langchain_community.chat_models import ChatOpenAI
         from langchain.prompts import PromptTemplate
-        from langchain.chains import LLMChain
+        from langchain_core.runnables import RunnablePassthrough
+        logger.info("Using langchain_community for ChatOpenAI")
     except ImportError:
-        logger.error("LangChain not available. Install: pip install langchain-community")
-        sys.exit(1)
+        try:
+            from langchain.chat_models import ChatOpenAI
+            from langchain.prompts import PromptTemplate
+            from langchain.chains import LLMChain
+            logger.info("Using legacy langchain imports")
+        except ImportError:
+            logger.error("LangChain not available. Install: pip install langchain-openai")
+            sys.exit(1)
 
 
 # Simple models
@@ -110,7 +118,13 @@ class LegalGraphExtractor:
 
 Повертайте ТІЛЬКИ JSON без додаткового тексту.""")
 
-        self.chain = LLMChain(llm=self.llm, prompt=self.prompt)
+        # Use new RunnablePassthrough instead of deprecated LLMChain
+        try:
+            self.chain = self.prompt | self.llm
+        except AttributeError:
+            # Fallback to LLMChain if RunnablePassthrough not available
+            from langchain.chains import LLMChain
+            self.chain = LLMChain(llm=self.llm, prompt=self.prompt)
 
     async def extract_triplets(self, text: str, entities: List[Dict]) -> LegalKnowledgeGraph:
         # Keep ALL entities
@@ -136,8 +150,23 @@ class LegalGraphExtractor:
         }
 
         try:
-            # Get raw LLM output
-            result = await self.chain.arun(text=text, entity_list=entity_list_str)
+            # Get raw LLM output - handle both new and old chain types
+            if hasattr(self.chain, 'invoke'):
+                # New RunnablePassthrough style
+                result = await self.chain.ainvoke({
+                    "text": text, 
+                    "entity_list": entity_list_str
+                })
+                # Extract text from AIMessage or dict
+                if hasattr(result, 'content'):
+                    result = result.content
+                elif isinstance(result, dict):
+                    result = result.get('text', str(result))
+                else:
+                    result = str(result)
+            else:
+                # Old LLMChain style
+                result = await self.chain.arun(text=text, entity_list=entity_list_str)
             
             # Log raw output for debugging
             debug_info["raw_llm_output"] = result
@@ -272,7 +301,7 @@ def visualize_results(results_file: str, output_dir: str = "graphs/", **kwargs):
 
 # --------------------------- BigQuery backend -----------------------------
 
-def run_bigquery(table_id: str, batch: int, extractor: LegalGraphExtractor,
+async def run_bigquery(table_id: str, batch: int, extractor: LegalGraphExtractor,
                  project: Optional[str] = None, key_path: Optional[str] = None,
                  update_existing: bool = False):
     """Process documents from BigQuery table and update with triplet extraction results"""
@@ -343,29 +372,27 @@ def run_bigquery(table_id: str, batch: int, extractor: LegalGraphExtractor,
                     except:
                         logger.warning(f"Could not parse entities for doc {doc_id}")
 
-                # Process document
-                result = asyncio.run(process_document(text, entities, doc_id, extractor))
+                # Process document - use await directly since we're in an async function
+                result = await process_document(text, entities, doc_id, extractor)
+                
+                # Prepare the update data
+                triplets_json = json.dumps(result.get('knowledge_graph', {}).get('triplets', []), ensure_ascii=False)
+                # Escape the JSON for BigQuery
+                triplets_json_escaped = triplets_json.replace("'", "\\'").replace('"', '\\"')
+                triplets_count = result.get('triplets_count', 0)
                 
                 # Update the existing table with triplet results
                 update_sql = f"""
                     UPDATE `{table_id}`
-                    SET triplets = @triplets,
-                        triplets_count = @triplets_count,
-                        processing_timestamp = @processing_timestamp
-                    WHERE doc_id = @doc_id
+                    SET triplets = JSON '{triplets_json_escaped}',
+                        triplets_count = @triplets_count
+                    WHERE CAST(doc_id AS STRING) = @doc_id
                 """
-                
-                # Prepare the update data
-                triplets_json = json.dumps(result.get('knowledge_graph', {}).get('triplets', []), ensure_ascii=False)
-                triplets_count = result.get('triplets_count', 0)
-                processing_timestamp = result.get('processing_timestamp', datetime.now().isoformat())
                 
                 # Execute the update
                 job_config = bigquery.QueryJobConfig(
                     query_parameters=[
-                        bigquery.ScalarQueryParameter("triplets", "STRING", triplets_json),
                         bigquery.ScalarQueryParameter("triplets_count", "INTEGER", triplets_count),
-                        bigquery.ScalarQueryParameter("processing_timestamp", "TIMESTAMP", processing_timestamp),
                         bigquery.ScalarQueryParameter("doc_id", "STRING", doc_id),
                     ]
                 )
@@ -402,6 +429,11 @@ def check_bigquery_schema(table_id: str):
         logger.info(f"Optional columns: {optional_columns}")
         logger.info(f"Missing required: {missing_required}")
         logger.info(f"Existing optional: {existing_optional}")
+        
+        # Log the actual schema details
+        logger.info("Actual table schema:")
+        for field in table.schema:
+            logger.info(f"  {field.name}: {field.field_type}")
         
         if missing_required:
             logger.error(f"Missing required columns: {missing_required}")
@@ -511,7 +543,7 @@ async def main():
             return
             
         extractor = LegalGraphExtractor(debug_output=args.debug_output)
-        run_bigquery(
+        await run_bigquery(
             table_id=args.bq_table,
             batch=args.batch,
             extractor=extractor,
