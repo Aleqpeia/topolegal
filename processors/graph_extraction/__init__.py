@@ -17,7 +17,7 @@ class KnowledgeTriplet(BaseModel):
     legal_reference: Optional[str] = None  # Legal basis for this relationship
     confidence: float = 0.0
 
-    def __str__(self) -> str:
+    def __str__(self) -> str
         return f"({self.source}, {self.relation}, {self.target})"
 
 class LegalEntity(BaseModel):

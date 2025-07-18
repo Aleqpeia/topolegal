@@ -9,6 +9,7 @@ This module provides comprehensive legal knowledge graph extraction and visualiz
 - **Multiple Output Formats**: Export graphs as PNG images, GraphML, GML, and CSV
 - **Statistics Generation**: Comprehensive graph analysis and statistics
 - **Flexible Processing**: Support for individual documents, combined graphs, and person-specific subgraphs
+- **BigQuery Integration**: Process documents directly from BigQuery tables and update with triplet results
 
 ## Installation
 
@@ -20,6 +21,9 @@ pip install langchain-community openai pandas
 
 # Visualization dependencies
 pip install matplotlib seaborn networkx
+
+# BigQuery dependencies
+pip install google-cloud-bigquery
 ```
 
 ### NixOS Setup
@@ -106,6 +110,32 @@ python -m processors.graph_extraction.__main__ data.csv \
   --individual \
   --export \
   --stats
+```
+
+#### Process BigQuery Tables
+
+```bash
+# Basic BigQuery processing
+python processors/graph_extraction/bigquery_triplets.py \
+  --table lab-test-project-1-305710.court_data_2022.processing_doc_links
+
+# With custom settings
+python processors/graph_extraction/bigquery_triplets.py \
+  --table lab-test-project-1-305710.court_data_2022.processing_doc_links \
+  --gcp-project your-project-id \
+  --gcp-key /path/to/service-account.json \
+  --batch 500 \
+  --debug-output debug_logs/
+
+# Update existing records with zero triplets
+python processors/graph_extraction/bigquery_triplets.py \
+  --table lab-test-project-1-305710.court_data_2022.processing_doc_links \
+  --update-existing
+
+# Check table schema and show statistics
+python processors/graph_extraction/bigquery_triplets.py \
+  --table lab-test-project-1-305710.court_data_2022.processing_doc_links \
+  --check-schema --stats
 ```
 
 #### Visualize Existing Results
@@ -196,7 +226,33 @@ visualize_graphs('results.json', 'graphs/', combined=True, export=True)
 
 ```bash
 export OPENAI_API_KEY="your-openai-api-key"
+export GOOGLE_CLOUD_PROJECT="your-gcp-project-id"
+export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
 ```
+
+### BigQuery Table Schema
+
+The BigQuery table should have the following structure:
+
+```sql
+-- Required columns
+doc_id STRING NOT NULL,
+text STRING,
+tags STRING,  -- JSON string of entities
+
+-- Optional columns (will be updated by the script)
+triplets STRING,  -- JSON string of extracted triplets
+triplets_count INT64,
+processing_timestamp TIMESTAMP
+```
+
+#### BigQuery Processing Features
+
+- **Idempotent Processing**: Only processes documents without triplets or with zero triplets
+- **Batch Processing**: Processes documents in configurable batches
+- **Error Handling**: Continues processing even if individual documents fail
+- **Statistics**: Provides processing statistics and table schema validation
+- **Debug Output**: Saves LLM responses for debugging and analysis
 
 ### Model Configuration
 
@@ -221,7 +277,7 @@ extractor = LegalGraphExtractor(
 
 1. **Missing Dependencies**
    ```bash
-   pip install matplotlib seaborn networkx
+   pip install matplotlib seaborn networkx google-cloud-bigquery
    ```
 
 2. **NixOS Library Issues**
@@ -235,7 +291,12 @@ extractor = LegalGraphExtractor(
    - Verify API key has sufficient credits
    - Check rate limits
 
-4. **Memory Issues with Large Graphs**
+4. **BigQuery Authentication Issues**
+   - Verify service account key: `echo $GOOGLE_APPLICATION_CREDENTIALS`
+   - Check project ID: `echo $GOOGLE_CLOUD_PROJECT`
+   - Ensure service account has BigQuery permissions
+
+5. **Memory Issues with Large Graphs**
    - Reduce `max-docs` parameter
    - Increase `min-confidence` threshold
    - Use `--individual` instead of `--combined`
@@ -246,6 +307,7 @@ extractor = LegalGraphExtractor(
 - Set higher `min-confidence` to reduce noise
 - Use `--delay` to respect API rate limits
 - Process in batches for large datasets
+- Use `--batch` parameter for BigQuery processing
 
 ## Example Workflow
 
@@ -271,4 +333,28 @@ This will create:
 - `analysis_results/combined_graph_conf_0.6.graphml`: Network analysis file
 - `analysis_results/combined_graph_stats_conf_0.6.json`: Statistics
 - `analysis_results/combined_graph_conf_0.6_edges.csv`: Edge list
-- `analysis_results/combined_graph_conf_0.6_nodes.csv`: Node list 
+- `analysis_results/combined_graph_conf_0.6_nodes.csv`: Node list
+
+### BigQuery Workflow
+
+```bash
+# Check table schema and statistics
+python processors/graph_extraction/bigquery_triplets.py \
+  --table lab-test-project-1-305710.court_data_2022.processing_doc_links \
+  --check-schema --stats
+
+# Process documents and update table
+python processors/graph_extraction/bigquery_triplets.py \
+  --table lab-test-project-1-305710.court_data_2022.processing_doc_links \
+  --batch 1000 \
+  --debug-output debug_logs/
+
+# Query results from BigQuery
+bq query --use_legacy_sql=false "
+SELECT doc_id, triplets_count, entities_count
+FROM \`lab-test-project-1-305710.court_data_2022.processing_doc_links\`
+WHERE triplets_count > 0
+ORDER BY triplets_count DESC
+LIMIT 10
+"
+``` 
