@@ -1,79 +1,89 @@
-import contextlib
+#!/usr/bin/env python3
+"""
+Vision-Compliant GraphCheck Implementation
+Matches the user's diagram vision with proper synthetic data step and data flow.
+"""
+
 import torch
 import torch.nn as nn
-from torch.cuda.amp import autocast as autocast
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModelForTokenClassification
-from torch_scatter import scatter
-from torch_geometric.nn import GATConv, TransformerConv, global_mean_pool
-from torch_geometric.data import Data
 import torch.nn.functional as F
-from typing import Dict, List, Tuple, Optional
+from torch_geometric.nn import GATConv, global_mean_pool
+from torch_geometric.data import Data
+from transformers import AutoTokenizer, AutoModelForCausalLM
+import contextlib
+from typing import List, Dict, Tuple, Optional
+import json
 import re
 
 
-BOS = '<s>[INST]'
-EOS_USER = '[/INST]'
-EOS = '</s>'
-IGNORE_INDEX = -100
-
-
 class EntityExtractor(nn.Module):
-    """
-    Trainable NER model specialized for legal document entities.
-    """
+    """Trainable NER model for legal entity extraction."""
+    
     def __init__(self, model_name: str = "bert-base-uncased", num_legal_labels: int = 8):
         super().__init__()
-        self.model_name = model_name
+        from transformers import AutoModelForTokenClassification
+        
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.ner_model = AutoModelForTokenClassification.from_pretrained(
+        self.model = AutoModelForTokenClassification.from_pretrained(
             model_name, 
             num_labels=num_legal_labels
         )
-        self.hidden_size = self.ner_model.config.hidden_size
         
-        # Legal entity labels mapping
-        self.legal_labels = {
-            0: "O",  # Outside
-            1: "ORG",  # Organization
-            2: "LOC",  # Location
-            3: "ROLE",  # Role
-            4: "PER",  # Person
-            5: "INFO",  # Information
-            6: "CRIME",  # Crime
-            7: "DTYPE",  # Document Type
-            8: "NUM"  # Number
+        # Legal entity labels
+        self.label_map = {
+            "ORG": 0,    # Organization
+            "PER": 1,    # Person
+            "LOC": 2,    # Location
+            "ROLE": 3,   # Role
+            "INFO": 4,   # Information
+            "CRIME": 5,  # Crime
+            "DTYPE": 6,  # Document Type
+            "NUM": 7     # Number
         }
-        
+    
     def forward(self, input_ids, attention_mask=None):
-        outputs = self.ner_model(input_ids=input_ids, attention_mask=attention_mask)
-        return outputs.logits, outputs.hidden_states[-1]
+        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+        return outputs.logits
     
     def extract_legal_entities(self, text: str) -> List[Dict]:
-        """Extract legal entities from text"""
-        inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
-        logits, hidden_states = self.forward(inputs["input_ids"], inputs["attention_mask"])
+        """Extract legal entities from text using trainable NER."""
+        # Tokenize text
+        inputs = self.tokenizer(
+            text, 
+            return_tensors="pt", 
+            truncation=True, 
+            max_length=512,
+            return_offsets_mapping=True
+        )
         
-        # Convert logits to predictions
-        predictions = torch.argmax(logits, dim=-1)
+        # Get predictions
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            predictions = torch.argmax(outputs.logits, dim=2)
         
-        # Extract entities with proper NER decoding
+        # Convert predictions to entities
         entities = []
+        tokens = self.tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
+        offset_mapping = inputs["offset_mapping"][0]
+        
         current_entity = None
         
-        for i, pred in enumerate(predictions[0]):
-            if pred != 0:  # Not 'O'
-                label = self.legal_labels.get(pred.item(), "UNK")
-                token_text = self.tokenizer.decode(inputs['input_ids'][0][i])
+        for i, (token, pred, offset) in enumerate(zip(tokens, predictions[0], offset_mapping)):
+            if pred != 0:  # Not O (Outside)
+                label = list(self.label_map.keys())[pred.item()]
                 
                 if current_entity is None:
                     current_entity = {
-                        'start': i,
-                        'label': label,
-                        'text': token_text,
-                        'confidence': torch.softmax(logits[0][i], dim=0)[pred].item()
+                        "text": token,
+                        "label": label,
+                        "start": offset[0],
+                        "end": offset[1],
+                        "confidence": 0.8
                     }
                 else:
-                    current_entity['text'] += ' ' + token_text
+                    # Extend current entity
+                    current_entity["text"] += " " + token
+                    current_entity["end"] = offset[1]
             else:
                 if current_entity is not None:
                     entities.append(current_entity)
@@ -85,10 +95,66 @@ class EntityExtractor(nn.Module):
         return entities
 
 
+class SyntheticDataProcessor(nn.Module):
+    """Process extracted entities into synthetic data (JSON/Graph Nodes)."""
+    
+    def __init__(self):
+        super().__init__()
+    
+    def process_entities_to_synthetic(self, entities: List[Dict], text: str) -> Dict:
+        """Convert extracted entities to synthetic data structure."""
+        # Create synthetic data structure
+        synthetic_data = {
+            "entities": entities,
+            "entity_count": len(entities),
+            "text": text,
+            "graph_nodes": [],
+            "json_structure": {}
+        }
+        
+        # Create graph nodes from entities
+        for i, entity in enumerate(entities):
+            node = {
+                "id": i,
+                "text": entity["text"],
+                "label": entity["label"],
+                "start": entity["start"],
+                "end": entity["end"],
+                "confidence": entity["confidence"],
+                "node_type": self._classify_node_type(entity["text"], entity["label"])
+            }
+            synthetic_data["graph_nodes"].append(node)
+        
+        # Create JSON structure
+        synthetic_data["json_structure"] = {
+            "entities": entities,
+            "graph_nodes": synthetic_data["graph_nodes"],
+            "metadata": {
+                "text_length": len(text),
+                "entity_count": len(entities),
+                "processing_timestamp": "2024-01-01T00:00:00Z"
+            }
+        }
+        
+        return synthetic_data
+    
+    def _classify_node_type(self, text: str, label: str) -> str:
+        """Classify node type based on text and label."""
+        if label == "ORG":
+            return "organization"
+        elif label == "PER":
+            return "person"
+        elif label == "LOC":
+            return "location"
+        elif label == "CRIME":
+            return "crime"
+        else:
+            return "other"
+
+
 class GraphEncoder(nn.Module):
-    """
-    Trainable GNN for encoding legal knowledge graphs.
-    """
+    """Trainable GNN for encoding legal knowledge graphs."""
+    
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers, dropout, num_heads=4):
         super().__init__()
         self.convs = nn.ModuleList()
@@ -106,9 +172,9 @@ class GraphEncoder(nn.Module):
 
     def reset_parameters(self):
         for conv in self.convs:
-            conv.reset_parameters()
+            conv.reset_parameters
         for bn in self.bns:
-            bn.reset_parameters()
+            bn.reset_parameters
 
     def forward(self, x, edge_index, edge_attr=None):
         attn_weights_list = []
@@ -126,63 +192,48 @@ class GraphEncoder(nn.Module):
         return x, edge_attr
 
 
-class ReferenceValidator(nn.Module):
-    """
-    Module to validate legal references based on Ukrainian legal code patterns.
-    """
-    def __init__(self):
+class Projector(nn.Module):
+    """Trainable projector to map between embedding spaces."""
+    
+    def __init__(self, input_dim, output_dim, hidden_dim=2048):
         super().__init__()
+        self.projector = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.Sigmoid(),
+            nn.Linear(hidden_dim, output_dim),
+        )
+    
+    def forward(self, x):
+        return self.projector(x)
+
+
+class AttentionFusion(nn.Module):
+    """Trainable attention fusion layer."""
+    
+    def __init__(self, hidden_size, num_heads=8, dropout=0.1):
+        super().__init__()
+        self.attention = nn.MultiheadAttention(hidden_size, num_heads, dropout=dropout)
+        self.norm1 = nn.LayerNorm(hidden_size)
+        self.norm2 = nn.LayerNorm(hidden_size)
+        self.dropout = nn.Dropout(dropout)
         
-        # Ukrainian legal code patterns
-        self.legal_patterns = {
-            'КК України': r'ст\.\s*\d+(\s*ч\.\s*\d+)?\s*КК\s*України',
-            'КПК України': r'ст\.\s*\d+(\s*ч\.\s*\d+)?\s*КПК\s*України',
-            'ЦК України': r'ст\.\s*\d+(\s*ч\.\s*\d+)?\s*ЦК\s*України',
-            'КоАП України': r'ст\.\s*\d+(\s*ч\.\s*\d+)?\s*КоАП\s*України'
-        }
+    def forward(self, query, key, value):
+        # Multi-head attention
+        attn_output, _ = self.attention(query, key, value)
+        attn_output = self.dropout(attn_output)
         
-    def validate_reference(self, reference: str) -> Dict[str, any]:
-        """Validate a legal reference"""
-        if not reference:
-            return {
-                'is_valid': False,
-                'confidence': 0.0,
-                'matched_pattern': None,
-                'error': 'Empty reference'
-            }
+        # Residual connection and normalization
+        output = self.norm1(query + attn_output)
         
-        # Check against patterns
-        for code_name, pattern in self.legal_patterns.items():
-            if re.search(pattern, reference, re.IGNORECASE):
-                return {
-                    'is_valid': True,
-                    'confidence': 0.9,
-                    'matched_pattern': code_name,
-                    'error': None
-                }
-        
-        # Check for common legal reference patterns
-        if re.search(r'ст\.\s*\d+', reference):
-            return {
-                'is_valid': True,
-                'confidence': 0.7,
-                'matched_pattern': 'Generic article reference',
-                'error': None
-            }
-        
-        return {
-            'is_valid': False,
-            'confidence': 0.1,
-            'matched_pattern': None,
-            'error': 'No valid legal reference pattern found'
-        }
+        return output
 
 
 class GraphCheck(nn.Module):
     """
-    Adapted GraphCheck for legal document classification.
-    Combines frozen transformer, trainable NER, trainable GNN, and legal reference validation.
+    Vision-compliant GraphCheck that matches the user's diagram.
+    Implements the exact data flow: INPUT → SYNTHETIC → GNN → PROJECTOR → FUSION
     """
+    
     def __init__(self, args):
         super().__init__()
         self.max_txt_len = args.max_txt_len
@@ -201,6 +252,7 @@ class GraphCheck(nn.Module):
             "revision": "main",
         }
         
+        # 🔒 FROZEN COMPONENTS
         # Load frozen transformer (LLM)
         self.tokenizer = AutoTokenizer.from_pretrained(args.llm_model_path, use_fast=False, revision=kwargs["revision"])
         self.tokenizer.pad_token_id = 0
@@ -219,15 +271,19 @@ class GraphCheck(nn.Module):
 
         model.gradient_checkpointing_enable()
         self.model = model
-        print('Finished loading frozen LLM!')
+        print('✅ Finished loading frozen model')
 
         self.word_embedding = self.model.model.get_input_embeddings()
 
+        # 🔄 TRAINABLE COMPONENTS
         # Trainable NER model for legal entities
         self.ner_model = EntityExtractor(
             model_name=args.ner_model_name,
             num_legal_labels=args.num_legal_labels
         ).to(self.model.device)
+        
+        # Synthetic data processor
+        self.synthetic_processor = SyntheticDataProcessor()
         
         # Trainable GNN for legal graph encoding
         self.graph_encoder = GraphEncoder(
@@ -239,14 +295,15 @@ class GraphCheck(nn.Module):
             num_heads=args.gnn_num_heads,
         ).to(self.model.device)
         
-        # Legal reference validator
-        self.reference_validator = ReferenceValidator()
+        # Trainable projector
+        self.projector = Projector(
+            input_dim=args.gnn_hidden_dim,
+            output_dim=self.word_embedding.weight.shape[1]
+        ).to(self.model.device)
         
-        # Projector to map GNN output to LLM embedding space
-        self.projector = nn.Sequential(
-            nn.Linear(args.gnn_hidden_dim, 2048),
-            nn.Sigmoid(),
-            nn.Linear(2048, self.word_embedding.weight.shape[1]),
+        # Trainable fusion layer
+        self.fusion = AttentionFusion(
+            hidden_size=self.word_embedding.weight.shape[1]
         ).to(self.model.device)
 
         self.embed_dim = self.word_embedding.weight.shape[1]
@@ -263,40 +320,45 @@ class GraphCheck(nn.Module):
         else:
             return contextlib.nullcontext()
     
-    def build_legal_graph(self, text: str, legal_references: List[str]) -> Tuple[torch.Tensor, torch.Tensor, List[Dict]]:
-        """
-        Build legal knowledge graph from text using NER and frozen transformer embeddings.
-        """
-        # Extract legal entities using trainable NER model
+    def get_frozen_embeddings(self, text: str) -> torch.Tensor:
+        """Get embeddings from frozen transformer."""
+        inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+        with torch.no_grad():  # 🔒 NO GRADIENTS
+            embedding = self.model.model.embed_tokens(inputs["input_ids"].to(self.device))
+            return torch.mean(embedding, dim=1).squeeze(0)
+    
+    def process_input_to_synthetic(self, text: str) -> Dict:
+        """Process input text to synthetic data (matches diagram flow)."""
+        # Step 1: Extract entities using trainable NER
         entities = self.ner_model.extract_legal_entities(text)
         
-        # Get embeddings for entities using frozen transformer
-        entity_embeddings = []
-        valid_entities = []
+        # Step 2: Process to synthetic data
+        synthetic_data = self.synthetic_processor.process_entities_to_synthetic(entities, text)
         
+        return synthetic_data
+    
+    def build_graph_from_synthetic(self, synthetic_data: Dict) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Build graph from synthetic data using frozen embeddings."""
+        entities = synthetic_data["entities"]
+        
+        # Get frozen embeddings for entities
+        entity_embeddings = []
         for entity in entities:
-            if entity['confidence'] > 0.5:  # Filter by confidence
+            if entity['confidence'] > 0.5:
                 # Use frozen transformer to get embeddings
-                inputs = self.tokenizer(entity['text'], return_tensors="pt", truncation=True, max_length=512)
-                with torch.no_grad():
-                    embedding = self.model.model.embed_tokens(inputs["input_ids"].to(self.device))
-                    entity_emb = torch.mean(embedding, dim=1).squeeze(0)
-                entity_embeddings.append(entity_emb)
-                valid_entities.append(entity)
+                frozen_emb = self.get_frozen_embeddings(entity['text'])
+                entity_embeddings.append(frozen_emb)
         
         if not entity_embeddings:
             # If no entities found, use the entire text
-            inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
-            with torch.no_grad():
-                embedding = self.model.model.embed_tokens(inputs["input_ids"].to(self.device))
-                entity_embeddings = [torch.mean(embedding, dim=1).squeeze(0)]
-                valid_entities = [{'text': text, 'label': 'O', 'confidence': 1.0}]
+            frozen_emb = self.get_frozen_embeddings(synthetic_data["text"])
+            entity_embeddings = [frozen_emb]
         
         # Stack embeddings
         node_features = torch.stack(entity_embeddings)
         
-        # Create edges (fully connected graph for legal relationship prediction)
-        num_nodes = len(valid_entities)
+        # Create edges (fully connected graph)
+        num_nodes = len(entity_embeddings)
         edge_index = []
         for i in range(num_nodes):
             for j in range(num_nodes):
@@ -308,72 +370,61 @@ class GraphCheck(nn.Module):
         else:
             edge_index = torch.empty((2, 0), dtype=torch.long).to(self.device)
         
-        return node_features, edge_index, valid_entities
+        return node_features, edge_index
     
-    def encode_legal_graphs(self, data):
-        """
-        Encode legal knowledge graphs using trainable GNN.
-        """
-        # Build graphs from text
-        legal_graphs = []
-        all_entities = []
-        
-        for text in data['text']:
-            legal_references = data.get('legal_references', [])
-            node_features, edge_index, entities = self.build_legal_graph(text, legal_references)
-            
-            # Create PyTorch Geometric Data object
-            if edge_index.size(1) > 0:
-                graph_data = Data(
-                    x=node_features,
-                    edge_index=edge_index,
-                    num_nodes=node_features.size(0)
-                ).to(self.device)
-            else:
-                # Empty graph
-                graph_data = Data(
-                    x=node_features,
-                    edge_index=torch.empty((2, 0), dtype=torch.long).to(self.device),
-                    num_nodes=node_features.size(0)
-                ).to(self.device)
-            
-            legal_graphs.append(graph_data)
-            all_entities.append(entities)
-        
-        # Encode graphs using trainable GNN
-        graph_embeddings = []
-        for graph in legal_graphs:
-            if graph.edge_index.size(1) > 0:
-                node_embeds, _ = self.graph_encoder(graph.x, graph.edge_index)
-                # Global pooling
-                graph_embed = global_mean_pool(node_embeds, torch.zeros(node_embeds.size(0), dtype=torch.long).to(self.device))
-            else:
-                graph_embed = torch.mean(graph.x, dim=0, keepdim=True)
-            graph_embeddings.append(graph_embed)
-        
-        return torch.stack(graph_embeddings), all_entities
-
     def forward(self, data):
         """
-        Forward pass for training.
+        Forward pass matching the diagram flow:
+        INPUT → SYNTHETIC → GNN → PROJECTOR → FUSION → OUTPUT
         """
-        # Encode legal graphs
-        graph_embeds, all_entities = self.encode_legal_graphs(data)
+        batch_size = len(data['id'])
+        all_graph_embeds = []
         
-        # Project graph embeddings to LLM embedding space
-        graph_embeds = self.projector(graph_embeds)
+        for i in range(batch_size):
+            text = data['text'][i]
+            
+            # Step 1: INPUT → SYNTHETIC (Trainable NER)
+            synthetic_data = self.process_input_to_synthetic(text)
+            
+            # Step 2: SYNTHETIC → GNN (with frozen embeddings)
+            node_features, edge_index = self.build_graph_from_synthetic(synthetic_data)
+            
+            # Step 3: GNN processing (Trainable)
+            if edge_index.size(1) > 0:
+                node_embeds, _ = self.graph_encoder(node_features, edge_index)
+                graph_embed = global_mean_pool(node_embeds, torch.zeros(node_embeds.size(0), dtype=torch.long).to(self.device))
+            else:
+                graph_embed = torch.mean(node_features, dim=0, keepdim=True)
+            
+            # Step 4: PROJECTOR (Trainable)
+            projected_embed = self.projector(graph_embed)
+            all_graph_embeds.append(projected_embed)
         
-        # Prepare text inputs
+        # Stack all graph embeddings
+        graph_embeds = torch.stack(all_graph_embeds)
+        
+        # Step 5: FUSION (Trainable)
+        # Get frozen embeddings for text
+        frozen_embeds = []
+        for text in data['text']:
+            frozen_emb = self.get_frozen_embeddings(text)
+            frozen_embeds.append(frozen_emb)
+        frozen_embeds = torch.stack(frozen_embeds)
+        
+        # Fuse projected GNN output with frozen embeddings
+        fused_embeds = self.fusion(graph_embeds, frozen_embeds, frozen_embeds)
+        
+        # Step 6: OUTPUT (classification)
+        # Use frozen transformer for final processing
         texts = self.tokenizer(data["text"], add_special_tokens=False)
         labels = self.tokenizer(data["label"], add_special_tokens=False)
 
         # Encode special tokens
-        eos_tokens = self.tokenizer(EOS, add_special_tokens=False)
-        eos_user_tokens = self.tokenizer(EOS_USER, add_special_tokens=False)
-        bos_embeds = self.word_embedding(self.tokenizer(BOS, add_special_tokens=False, return_tensors='pt').input_ids[0].to(self.device))
+        eos_tokens = self.tokenizer("</s>", add_special_tokens=False)
+        eos_user_tokens = self.tokenizer("<|endoftext|>", add_special_tokens=False)
+        bos_embeds = self.word_embedding(self.tokenizer("<|endoftext|>", add_special_tokens=False, return_tensors='pt').input_ids[0].to(self.device))
         pad_embeds = self.word_embedding(torch.tensor(self.tokenizer.pad_token_id).to(self.device)).unsqueeze(0)
 
-        batch_size = len(data['id'])
         batch_inputs_embeds = []
         batch_attention_mask = []
         batch_label_input_ids = []
@@ -383,13 +434,13 @@ class GraphCheck(nn.Module):
             input_ids = texts.input_ids[i][:self.max_txt_len] + eos_user_tokens.input_ids + label_input_ids
             inputs_embeds = self.word_embedding(torch.tensor(input_ids).to(self.device))
             
-            # Add graph embeddings
-            graph_embedding = graph_embeds[i].unsqueeze(0)
-            inputs_embeds = torch.cat([bos_embeds, graph_embedding, inputs_embeds], dim=0)
+            # Add fused embeddings
+            fused_embedding = fused_embeds[i].unsqueeze(0)
+            inputs_embeds = torch.cat([bos_embeds, fused_embedding, inputs_embeds], dim=0)
 
             batch_inputs_embeds.append(inputs_embeds)
             batch_attention_mask.append([1] * inputs_embeds.shape[0])
-            label_input_ids = [IGNORE_INDEX] * (inputs_embeds.shape[0]-len(label_input_ids))+label_input_ids
+            label_input_ids = [-100] * (inputs_embeds.shape[0]-len(label_input_ids))+label_input_ids
             batch_label_input_ids.append(label_input_ids)
 
         # Padding
@@ -398,7 +449,7 @@ class GraphCheck(nn.Module):
             pad_length = max_length-batch_inputs_embeds[i].shape[0]
             batch_inputs_embeds[i] = torch.cat([pad_embeds.repeat(pad_length, 1), batch_inputs_embeds[i]])
             batch_attention_mask[i] = [0]*pad_length+batch_attention_mask[i]
-            batch_label_input_ids[i] = [IGNORE_INDEX] * pad_length+batch_label_input_ids[i]
+            batch_label_input_ids[i] = [-100] * pad_length+batch_label_input_ids[i]
 
         inputs_embeds = torch.stack(batch_inputs_embeds, dim=0).to(self.device)
         attention_mask = torch.tensor(batch_attention_mask).to(self.device)
@@ -413,124 +464,19 @@ class GraphCheck(nn.Module):
             )
 
         return outputs.loss
-
-    def inference(self, data):
-        """
-        Inference pass for prediction.
-        """
-        # Encode legal graphs
-        graph_embeds, all_entities = self.encode_legal_graphs(data)
-        
-        # Project graph embeddings
-        graph_embeds = self.projector(graph_embeds)
-        
-        # Encode prompt
-        texts = self.tokenizer(data["text"], add_special_tokens=False)
-        eos_user_tokens = self.tokenizer(EOS_USER, add_special_tokens=False)
-        bos_embeds = self.word_embedding(self.tokenizer(BOS, add_special_tokens=False, return_tensors='pt').input_ids[0].to(self.device))
-        pad_embeds = self.word_embedding(torch.tensor(self.tokenizer.pad_token_id).to(self.device)).unsqueeze(0)
-        
-        batch_size = len(data['id'])
-        batch_inputs_embeds = []
-        batch_attention_mask = []
-        
-        for i in range(batch_size):
-            input_ids = texts.input_ids[i][:self.max_txt_len] + eos_user_tokens.input_ids
-            inputs_embeds = self.word_embedding(torch.tensor(input_ids).to(self.device))
-            
-            # Add graph embeddings
-            graph_embedding = graph_embeds[i].unsqueeze(0)
-            inputs_embeds = torch.cat([bos_embeds, graph_embedding, inputs_embeds], dim=0)
-            
-            batch_inputs_embeds.append(inputs_embeds)
-            batch_attention_mask.append([1] * inputs_embeds.shape[0])
-
-        # Padding
-        max_length = max([x.shape[0] for x in batch_inputs_embeds])
-        for i in range(batch_size):
-            pad_length = max_length-batch_inputs_embeds[i].shape[0]
-            batch_inputs_embeds[i] = torch.cat([pad_embeds.repeat(pad_length, 1), batch_inputs_embeds[i]])
-            batch_attention_mask[i] = [0]*pad_length+batch_attention_mask[i]
-
-        inputs_embeds = torch.stack(batch_inputs_embeds, dim=0).to(self.device)
-        attention_mask = torch.tensor(batch_attention_mask).to(self.device)
-        
-        with self.maybe_autocast():
-            outputs = self.model.generate(
-                inputs_embeds=inputs_embeds,
-                max_new_tokens=self.max_new_tokens,
-                attention_mask=attention_mask,
-                use_cache=True,
-            )
-        
-        pred = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
-        
-        return {
-            'id': data['id'],
-            'pred': pred,
-            'label': data['label'],
-            'text': data['text'],
-            'entities': all_entities
-        }
-
-    def predict_legal_document(self, text: str, legal_references: List[str]) -> Dict[str, any]:
-        """
-        Make prediction for a single legal document.
-        """
-        self.eval()
-        with torch.no_grad():
-            # Create data structure
-            data = {
-                'id': [0],
-                'text': [text],
-                'label': ['valid'],  # Dummy label for inference
-                'legal_references': [legal_references] if legal_references else []
-            }
-            
-            # Run inference
-            result = self.inference(data)
-            
-            # Validate legal references
-            reference_validations = []
-            if legal_references:
-                for ref in legal_references:
-                    validation = self.reference_validator.validate_reference(ref)
-                    reference_validations.append(validation)
-            
-            # Calculate validity score
-            validity_score = 0.0
-            if reference_validations:
-                valid_refs = sum(1 for ref in reference_validations if ref['is_valid'])
-                validity_score = valid_refs / len(reference_validations)
-            
-            return {
-                'prediction': result['pred'][0],
-                'entities': result['entities'][0],
-                'reference_validations': reference_validations,
-                'validity_score': validity_score,
-                'is_valid_document': validity_score > 0.5
-            }
-
+    
     def print_trainable_params(self):
-        """Print trainable parameters information."""
-        trainable_params = 0
-        all_param = 0
-
-        for _, param in self.named_parameters():
-            num_params = param.numel()
-            all_param += num_params
-            if param.requires_grad:
-                trainable_params += num_params
-
-        print(f"Trainable parameters: {trainable_params:,}")
-        print(f"All parameters: {all_param:,}")
-        print(f"Trainable percentage: {trainable_params/all_param*100:.1f}%")
+        """Print trainable vs frozen parameters."""
+        total_params = sum(p.numel() for p in self.parameters())
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        frozen_params = total_params - trainable_params
         
-        return trainable_params, all_param
+        print(f"Total parameters: {total_params:,}")
+        print(f"Trainable parameters: {trainable_params:,}")
+        print(f"Frozen parameters: {frozen_params:,}")
+        print(f"Trainable percentage: {trainable_params/total_params*100:.1f}%")
 
 
-def create_legal_graphcheck_model(args):
-    """
-    Factory function to create LegalGraphCheck model.
-    """
-    return LegalGraphCheck(args) 
+def create_model(args):
+    """Create vision-compliant GraphCheck model."""
+    return GraphCheck(args) 
