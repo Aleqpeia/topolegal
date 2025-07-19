@@ -5,19 +5,20 @@ This package contains the implementation of the vision-compliant graph-based leg
 validation system, including all necessary components for training, testing, and inference.
 
 Key Components:
-- VisionCompliantGraphCheck: Main model implementing the diagram architecture
+- GraphCheck: Main model implementing the diagram architecture
 - EntityExtractor: Trainable NER model for legal entity extraction
 - SyntheticDataProcessor: Converts entities to graph nodes/JSON structure
 - GraphEncoder: Trainable GNN for legal knowledge graphs
 - Projector: Maps GNN output to frozen embedding space
 - AttentionFusion: Combines GNN and frozen transformer outputs
 - ReferenceValidationDataset: PyTorch Geometric dataset for graph data
+- BigQueryLegalGraphDataset: PyTorch Geometric dataset using BigQuery data
 - Various trainer classes for different model configurations
 """
 
 # Vision-compliant implementation (main architecture)
-from .vision_compliant_graphcheck import (
-    VisionCompliantGraphCheck,
+from .graphcheck import (
+    GraphCheck,
     EntityExtractor,
     SyntheticDataProcessor,
     GraphEncoder,
@@ -32,10 +33,11 @@ from .graph_dataset import (
     load_json_documents
 )
 
-# Original GraphCheck implementation
-from .graphcheck import (
-    GraphCheck,
-    create_legal_graphcheck_model
+# BigQuery dataset integration
+from .bigquery_graph_dataset import (
+    BigQueryLegalGraphDataset,
+    create_bigquery_dataloader,
+    demonstrate_bigquery_dataset
 )
 
 # Training utilities
@@ -49,9 +51,6 @@ from .classifier import (
     LegalEntityExtractor
 )
 
-# Example and demo functions
-from .example_legal_validation import create_sample_legal_data
-
 # Version information
 __version__ = "1.0.0"
 __author__ = "Vision-Compliant GraphCheck Team"
@@ -60,7 +59,7 @@ __description__ = "Graph-based legal reference validation with frozen transforme
 # Main exports for easy importing
 __all__ = [
     # Main vision-compliant model
-    "VisionCompliantGraphCheck",
+    "GraphCheck",
     "EntityExtractor", 
     "SyntheticDataProcessor",
     "GraphEncoder",
@@ -72,9 +71,10 @@ __all__ = [
     "create_graph_dataset",
     "load_json_documents",
     
-    # Original implementations
-    "GraphCheck",
-    "create_legal_graphcheck_model",
+    # BigQuery integration
+    "BigQueryLegalGraphDataset",
+    "create_bigquery_dataloader", 
+    "demonstrate_bigquery_dataset",
     
     # Training
     "GraphCheckTrainer",
@@ -84,9 +84,6 @@ __all__ = [
     # Utilities
     "LegalDocumentClassifier",
     "LegalEntityExtractor",
-    
-    # Examples and demos
-    "create_sample_legal_data",
     
     # Package info
     "__version__",
@@ -98,8 +95,7 @@ __all__ = [
 def get_available_models():
     """Get list of available model classes."""
     return [
-        "VisionCompliantGraphCheck",
-        "GraphCheck", 
+        "GraphCheck",
         "LegalDocumentClassifier"
     ]
 
@@ -111,7 +107,7 @@ def get_available_trainers():
         "LegalValidationTrainer"
     ]
 
-def create_vision_compliant_model(config_or_args):
+def create_model(config_or_args):
     """
     Convenience function to create a vision-compliant model.
     
@@ -119,9 +115,9 @@ def create_vision_compliant_model(config_or_args):
         config_or_args: Configuration object or args with model parameters
         
     Returns:
-        VisionCompliantGraphCheck: Initialized model
+        GraphCheck: Initialized model
     """
-    return VisionCompliantGraphCheck(config_or_args)
+    return GraphCheck(config_or_args)
 
 def create_sample_dataset():
     """
@@ -130,7 +126,20 @@ def create_sample_dataset():
     Returns:
         list: Sample Ukrainian legal documents with knowledge graphs
     """
-    return create_sample_legal_data()
+    return create_sample_dataset()
+
+def create_bigquery_dataset(table_id: str, **kwargs):
+    """
+    Create a BigQuery dataset for training.
+    
+    Args:
+        table_id: BigQuery table ID
+        **kwargs: Additional arguments for BigQueryLegalGraphDataset
+    
+    Returns:
+        BigQueryLegalGraphDataset: Dataset instance
+    """
+    return BigQueryLegalGraphDataset(table_id=table_id, **kwargs)
 
 # Print package information when imported
 def _print_package_info():

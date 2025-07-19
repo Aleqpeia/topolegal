@@ -8,6 +8,7 @@ graph-based legal reference validation system.
 Usage:
     python -m models --help
     python -m models demo
+    python -m models bigquery-demo --table your-project.dataset.table
     python -m models train --config config.json
     python -m models test --model model.pt --data data.json
     python -m models info
@@ -27,12 +28,15 @@ sys.path.insert(0, str(models_dir.parent))
 try:
     from models import (
         GraphCheck,
-        create_vision_compliant_model,
+        create_model,
         create_sample_dataset,
         get_available_models,
         get_available_trainers,
         __version__,
-        __description__
+        __description__,
+        BigQueryLegalGraphDataset,
+        demonstrate_bigquery_dataset,
+        create_bigquery_dataset
     )
     from models.train_legal_validation import LegalValidationTrainer
     from models.example_legal_validation import create_sample_legal_data
@@ -61,6 +65,10 @@ def show_info():
     print()
     print(f"🤖 Available Models: {', '.join(get_available_models())}")
     print(f"👨‍🏫 Available Trainers: {', '.join(get_available_trainers())}")
+    print()
+    print("📊 Data Sources:")
+    print("   📄 Sample data (built-in Ukrainian legal documents)")
+    print("   🔥 BigQuery integration (production legal document datasets)")
 
 
 def run_demo():
@@ -104,6 +112,40 @@ def run_demo():
     print("\n✅ Demo completed! Use 'python -m models train' to start training.")
 
 
+def run_bigquery_demo(table_id):
+    """Run BigQuery dataset demonstration."""
+    print("🔥 BigQuery Legal Graph Dataset Demo")
+    print("=" * 50)
+    
+    try:
+        print(f"📊 Connecting to BigQuery table: {table_id}")
+        demonstrate_bigquery_dataset(table_id)
+        
+        print("\n📈 BigQuery Integration Benefits:")
+        print("   📊 Large-scale legal document datasets")
+        print("   🔄 Real-time data updates")
+        print("   📈 Scalable training pipelines")
+        print("   🔍 Advanced querying capabilities")
+        print("   🇺🇦 Ukrainian legal corpus processing")
+        
+        print(f"\n💡 Next Steps:")
+        print("   1. 📔 Use in notebook: models/notebooks/comprehensive_training_notebook.ipynb")
+        print("   2. 🏋️ Set USE_BIGQUERY = True in notebook")
+        print(f"   3. 📝 Update BIGQUERY_TABLE_ID = '{table_id}'")
+        print("   4. 🚀 Run full training pipeline")
+        
+    except Exception as e:
+        print(f"❌ BigQuery demo failed: {e}")
+        print("💡 Common issues:")
+        print("   - BigQuery credentials not configured")
+        print("   - Table doesn't exist or no permissions")
+        print("   - Missing google-cloud-bigquery package")
+        print("   - Network connectivity issues")
+        print("\n🔧 Setup BigQuery:")
+        print("   pip install google-cloud-bigquery")
+        print("   gcloud auth application-default login")
+
+
 def train_model(config_path=None):
     """Train a model with optional configuration."""
     print("🏋️ Training Vision-Compliant GraphCheck Model")
@@ -139,7 +181,7 @@ def train_model(config_path=None):
         if isinstance(config, dict):
             config = SimpleNamespace(**config)
         
-        model = create_vision_compliant_model(config)
+        model = create_model(config)
         print("✅ Model created successfully!")
         
         # Create sample data for training
@@ -148,6 +190,7 @@ def train_model(config_path=None):
         
         print("\n🚀 Training would start here...")
         print("💡 Use the Jupyter notebook for full training: models/notebooks/comprehensive_training_notebook.ipynb")
+        print("💡 For BigQuery data: python -m models bigquery-demo --table your-table-id")
         
     except Exception as e:
         print(f"❌ Error creating model: {e}")
@@ -177,7 +220,8 @@ def main():
         epilog="""
 Examples:
     python -m models info          # Show package information
-    python -m models demo          # Run demonstration
+    python -m models demo          # Run demonstration with sample data
+    python -m models bigquery-demo --table project.dataset.table  # BigQuery demo
     python -m models train         # Train with default config
     python -m models train --config config.json    # Train with custom config
     python -m models test --model model.pt         # Test trained model
@@ -190,7 +234,11 @@ Examples:
     info_parser = subparsers.add_parser('info', help='Show package information')
     
     # Demo command
-    demo_parser = subparsers.add_parser('demo', help='Run demonstration')
+    demo_parser = subparsers.add_parser('demo', help='Run demonstration with sample data')
+    
+    # BigQuery demo command
+    bigquery_parser = subparsers.add_parser('bigquery-demo', help='Run BigQuery dataset demonstration')
+    bigquery_parser.add_argument('--table', type=str, required=True, help='BigQuery table ID (project.dataset.table)')
     
     # Train command
     train_parser = subparsers.add_parser('train', help='Train a model')
@@ -207,6 +255,8 @@ Examples:
         show_info()
     elif args.command == 'demo':
         run_demo()
+    elif args.command == 'bigquery-demo':
+        run_bigquery_demo(args.table)
     elif args.command == 'train':
         train_model(args.config)
     elif args.command == 'test':
