@@ -1,35 +1,70 @@
 [project]
-name            = "topolegal"
-version         = "0.1.0"
-description     = "Add your description here"
-requires-python = ">=3.12"
-dependencies = [
-    "google-cloud==0.34.0",
-    "google-cloud-bigquery[all]==3.32.0",
-    "google-cloud-bigquery-storage>=2.24",
-    "google-cloud-storage==3.1.0",
-    "pandas>=2",
-    "protobuf>=6.31.0",
-    "pymorphy3==2.0.3",
-    "pymorphy3-dicts-uk==2.4.1.1.1663094765",
-    "python-dotenv>=1.1.0",
-    "spacy>=3.8",
-    "pip>=25.1.1",
-    "spacy-transformers>=1.3.8",
-    "gliner==0.2.19",
-    "psycopg>=3.2",
-    "gliner-spacy>=0.0.9",
-    "transformers>=4.49.0",
-    "langchain>=0.3",
-    "langchain-community>=0.3",
-    "ftfy>=6.3.1",
-    "pypandoc==1.15",
-    "pandoc==2.4",
-    "striprtf>=0.0.29",
-    "snowballstemmer>=3.0.1",
-    "psycopg>=3.2.9",
-    "requests>=2.32.3",
-    "psycopg-binary>=3.2.9",
-    "openai==1.90.0",
+name = "legal-graph"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Illia Savenko", email = "savenko.ilya@lll.kpi.ua"},
+    {name = "Nykyta Babylov", email = "nbobylov@gmail.com"}
 ]
+readme = "README.md"
+requires-python = ">=3.10"
 
+[tool.poetry.dependencies]
+python = ">=3.10,<3.12"
+numpy = "1.25.2"
+pandas = "2.0.3"
+matplotlib = "3.7.3"
+seaborn = "0.12.2"
+tqdm = "^4.66.1"
+langdetect = "^1.0.9"
+openpyxl = "^3.1.2"
+nltk = "^3.8.1"
+sentence-transformers = "^2.2.2"
+transformers = "^4.35.0"
+beautifulsoup4 = "^4.12.2"
+hydra-core = "^1.3.2"
+tensorboard = "^2.15.1"
+html5lib = "^1.1"
+jupyterlab = "^4.0.8"
+iso8601 = "^2.1.0"
+rfc3339 = "^6.2"
+wordcloud = "^1.9.2"
+datasets = "^2.14.6"
+pyldavis = "^3.4.1"
+bertopic = "^0.15.0"
+kaggle = "^1.5.16"
+spacy = "^3.7.2"
+eli5 = "^0.13.0"
+ipywidgets = "^8.1.1"
+jupyterlab-widgets = "^3.0.9"
+fastparquet = "^2023.10.1"
+langid = "^1.1.6"
+ydata-profiling = "^4.6.1"
+torch = "2.5.1"
+torchvision = "0.20.1"
+torchtext = "^0.18.0"
+torch-geometric = "^2.6.1"
+torch-scatter = { version = "*", source = "pyg" }
+torch-sparse = { version = "*", source = "pyg" }
+torch-cluster = { version = "*", source = "pyg" }
+scipy = "^1.13.0"
+tensorboardx = "2.6.2.2"
+google-cloud-bigquery = "^3.24.0"
+db-dtypes = "^1.4.3"
+google-cloud-bigquery-storage = "2.24.0"
+
+[tool.poetry]
+packages = [{ include = "legal_graph", from = "src" }]
+
+[[tool.poetry.source]]
+name = "pypi"
+priority = "primary"
+
+[[tool.poetry.source]]
+name = "pyg"
+url = "https://data.pyg.org/whl/torch-2.5.0+cpu.html"
+priority = "explicit"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
