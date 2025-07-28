@@ -1,16 +1,20 @@
-[project]
-name = "legal-graph"
+[tool.poetry]
+name = "legal_graph"
 version = "0.1.0"
-description = ""
+description = "LLM knowledge usage in graph neural network for highly accurate multi-task modular AI/ML system"
 authors = [
-    {name = "Illia Savenko", email = "savenko.ilya@lll.kpi.ua"},
-    {name = "Nykyta Babylov", email = "nbobylov@gmail.com"}
+    "Illia Savenko <savenko.ilya@lll.kpi.ua>",
+    "Mykyta Bobylyow <mbobylyov@biph.kiev.ua>"
 ]
 readme = "README.md"
-requires-python = ">=3.10"
+packages = [{ include = "legal_graph", from = "src" }]
 
 [tool.poetry.dependencies]
-python = ">=3.10,<3.12"
+python = ">=3.10,<4.0"
+pydantic = "^2.0.0"
+langchain-community = "^0.0.29"
+openai = "^1.0.0"
+networkx = "^3.0"
 numpy = "1.25.2"
 pandas = "2.0.3"
 matplotlib = "3.7.3"
@@ -52,9 +56,13 @@ tensorboardx = "2.6.2.2"
 google-cloud-bigquery = "^3.24.0"
 db-dtypes = "^1.4.3"
 google-cloud-bigquery-storage = "2.24.0"
+torchdrug = "^0.2.1"
+pyfunctional = "^1.5.0"
+jmespath = "^1.0.1"
+plotly = "^6.2.0"
+ipympl = "^0.9.7"
 
-[tool.poetry]
-packages = [{ include = "legal_graph", from = "src" }]
+
 
 [[tool.poetry.source]]
 name = "pypi"
