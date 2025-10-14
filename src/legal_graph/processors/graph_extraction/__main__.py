@@ -18,7 +18,9 @@ import os
 import sys
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 # Check for LangChain - try new packages first, then fallback
@@ -26,21 +28,26 @@ try:
     from langchain_openai import ChatOpenAI
     from langchain.prompts import PromptTemplate
     from langchain_core.runnables import RunnablePassthrough
+
     logger.info("Using langchain_openai for ChatOpenAI")
 except ImportError:
     try:
         from langchain_community.chat_models import ChatOpenAI
         from langchain.prompts import PromptTemplate
         from langchain_core.runnables import RunnablePassthrough
+
         logger.info("Using langchain_community for ChatOpenAI")
     except ImportError:
         try:
             from langchain.chat_models import ChatOpenAI
             from langchain.prompts import PromptTemplate
             from langchain.chains import LLMChain
+
             logger.info("Using legacy langchain imports")
         except ImportError:
-            logger.error("LangChain not available. Install: pip install langchain-openai")
+            logger.error(
+                "LangChain not available. Install: pip install langchain-openai"
+            )
             sys.exit(1)
 
 
@@ -67,7 +74,12 @@ class LegalKnowledgeGraph(BaseModel):
 
 
 class LegalGraphExtractor:
-    def __init__(self, model_name: str = "gpt-4.1-mini", temperature: float = 0.8, debug_output: Optional[str] = None):
+    def __init__(
+        self,
+        model_name: str = "gpt-4.1-mini",
+        temperature: float = 0.8,
+        debug_output: Optional[str] = None,
+    ):
         if not os.getenv("OPENAI_API_KEY"):
             logger.error("OPENAI_API_KEY not set!")
             sys.exit(1)
@@ -116,7 +128,8 @@ class LegalGraphExtractor:
     "legal_references": []
 }}
 
-Повертайте ТІЛЬКИ JSON без додаткового тексту.""")
+Повертайте ТІЛЬКИ JSON без додаткового тексту.""",
+        )
 
         # Use new RunnablePassthrough instead of deprecated LLMChain
         try:
@@ -124,21 +137,27 @@ class LegalGraphExtractor:
         except AttributeError:
             # Fallback to LLMChain if RunnablePassthrough not available
             from langchain.chains import LLMChain
+
             self.chain = LLMChain(llm=self.llm, prompt=self.prompt)
 
-    async def extract_triplets(self, text: str, entities: List[Dict]) -> LegalKnowledgeGraph:
+    async def extract_triplets(
+        self, text: str, entities: List[Dict]
+    ) -> LegalKnowledgeGraph:
         # Keep ALL entities
         all_entities = [
             LegalEntity(
                 text=e.get("text", ""),
                 label=e.get("label", ""),
                 start=e.get("start", 0),
-                end=e.get("end", 0)
-            ) for e in entities
+                end=e.get("end", 0),
+            )
+            for e in entities
         ]
 
         # Create entity list for prompt
-        entity_texts = [e.get("text", "") for e in entities if e.get("text", "").strip()]
+        entity_texts = [
+            e.get("text", "") for e in entities if e.get("text", "").strip()
+        ]
         entity_list_str = ", ".join(f'"{entity}"' for entity in entity_texts)
 
         # Prepare debug info
@@ -146,35 +165,34 @@ class LegalGraphExtractor:
             "text": text,
             "entities": entities,
             "entity_list_str": entity_list_str,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
         }
 
         try:
             # Get raw LLM output - handle both new and old chain types
-            if hasattr(self.chain, 'invoke'):
+            if hasattr(self.chain, "invoke"):
                 # New RunnablePassthrough style
-                result = await self.chain.ainvoke({
-                    "text": text, 
-                    "entity_list": entity_list_str
-                })
+                result = await self.chain.ainvoke(
+                    {"text": text, "entity_list": entity_list_str}
+                )
                 # Extract text from AIMessage or dict
-                if hasattr(result, 'content'):
+                if hasattr(result, "content"):
                     result = result.content
                 elif isinstance(result, dict):
-                    result = result.get('text', str(result))
+                    result = result.get("text", str(result))
                 else:
                     result = str(result)
             else:
                 # Old LLMChain style
                 result = await self.chain.arun(text=text, entity_list=entity_list_str)
-            
+
             # Log raw output for debugging
             debug_info["raw_llm_output"] = result
             debug_info["success"] = True
-            
+
             if self.debug_output:
                 self._save_debug_output(debug_info)
-            
+
             # Try to parse JSON
             try:
                 parsed = json.loads(result)
@@ -186,12 +204,14 @@ class LegalGraphExtractor:
                     self._save_debug_output(debug_info)
                 logger.error(f"JSON parse error: {e}")
                 logger.error(f"Raw output: {result[:500]}...")
-                return LegalKnowledgeGraph(triplets=[], entities=all_entities, legal_references=[])
+                return LegalKnowledgeGraph(
+                    triplets=[], entities=all_entities, legal_references=[]
+                )
 
             # Simple validation: only keep triplets with valid entities
             valid_triplets = []
             validation_errors = []
-            
+
             for i, t in enumerate(parsed.get("triplets", [])):
                 source = t.get("source", "")
                 target = t.get("target", "")
@@ -199,25 +219,31 @@ class LegalGraphExtractor:
 
                 # Check if source and target are in entity list
                 if source not in entity_texts:
-                    validation_errors.append(f"Triplet {i}: source '{source}' not in entity list")
+                    validation_errors.append(
+                        f"Triplet {i}: source '{source}' not in entity list"
+                    )
                 elif target not in entity_texts:
-                    validation_errors.append(f"Triplet {i}: target '{target}' not in entity list")
+                    validation_errors.append(
+                        f"Triplet {i}: target '{target}' not in entity list"
+                    )
                 elif not legal_ref or legal_ref == "null":
-                    validation_errors.append(f"Triplet {i}: missing or null legal_reference")
+                    validation_errors.append(
+                        f"Triplet {i}: missing or null legal_reference"
+                    )
                 else:
                     valid_triplets.append(KnowledgeTriplet(**t))
-            
+
             debug_info["validation_errors"] = validation_errors
             debug_info["valid_triplets_count"] = len(valid_triplets)
             debug_info["total_triplets_in_output"] = len(parsed.get("triplets", []))
-            
+
             if self.debug_output:
                 self._save_debug_output(debug_info)
 
             return LegalKnowledgeGraph(
                 triplets=valid_triplets,
                 entities=all_entities,
-                legal_references=parsed.get("legal_references", [])
+                legal_references=parsed.get("legal_references", []),
             )
 
         except Exception as e:
@@ -226,34 +252,38 @@ class LegalGraphExtractor:
             if self.debug_output:
                 self._save_debug_output(debug_info)
             logger.error(f"Error: {e}")
-            return LegalKnowledgeGraph(triplets=[], entities=all_entities, legal_references=[])
+            return LegalKnowledgeGraph(
+                triplets=[], entities=all_entities, legal_references=[]
+            )
 
     def _save_debug_output(self, debug_info):
         """Save debug information to file"""
         try:
             import json
             from pathlib import Path
-            
+
             if self.debug_output is None:
                 return
-                
+
             debug_dir = Path(self.debug_output)
             debug_dir.mkdir(parents=True, exist_ok=True)
-            
+
             # Create filename based on timestamp and success status
             timestamp = debug_info["timestamp"].replace(":", "-").replace(".", "-")
             success_str = "success" if debug_info.get("success", False) else "failed"
             filename = f"debug_{timestamp}_{success_str}.json"
-            
+
             debug_file = debug_dir / filename
-            with open(debug_file, 'w', encoding='utf-8') as f:
+            with open(debug_file, "w", encoding="utf-8") as f:
                 json.dump(debug_info, f, indent=2, ensure_ascii=False)
-                
+
         except Exception as e:
             logger.error(f"Failed to save debug output: {e}")
 
 
-async def process_document(text: str, entities: List[Dict], doc_id: str, extractor: LegalGraphExtractor) -> Dict:
+async def process_document(
+    text: str, entities: List[Dict], doc_id: str, extractor: LegalGraphExtractor
+) -> Dict:
     try:
         graph = await extractor.extract_triplets(text, entities)
 
@@ -269,18 +299,15 @@ async def process_document(text: str, entities: List[Dict], doc_id: str, extract
                         "relation": t.relation,
                         "target": t.target,
                         "legal_reference": t.legal_reference,
-                        "confidence": t.confidence
-                    } for t in graph.triplets
+                        "confidence": t.confidence,
+                    }
+                    for t in graph.triplets
                 ],
                 "entities": [
-                    {
-                        "text": e.text,
-                        "label": e.label,
-                        "start": e.start,
-                        "end": e.end
-                    } for e in graph.entities
-                ]
-            }
+                    {"text": e.text, "label": e.label, "start": e.start, "end": e.end}
+                    for e in graph.entities
+                ],
+            },
         }
     except Exception as e:
         return {"doc_id": doc_id, "error": str(e)}
@@ -290,22 +317,31 @@ def visualize_results(results_file: str, output_dir: str = "graphs/", **kwargs):
     """Visualize the knowledge graph results"""
     try:
         from . import visualize_graphs
+
         visualize_graphs(results_file, output_dir, **kwargs)
         logger.info(f"Graph visualization complete. Results saved to {output_dir}")
     except ImportError as e:
         logger.error(f"Missing visualization dependencies: {e}")
-        logger.info("Install required packages: pip install matplotlib seaborn networkx")
+        logger.info(
+            "Install required packages: pip install matplotlib seaborn networkx"
+        )
     except Exception as e:
         logger.error(f"Error during visualization: {e}")
 
 
 # --------------------------- BigQuery backend -----------------------------
 
-async def run_bigquery(table_id: str, batch: int, extractor: LegalGraphExtractor,
-                 project: Optional[str] = None, key_path: Optional[str] = None,
-                 update_existing: bool = False):
+
+async def run_bigquery(
+    table_id: str,
+    batch: int,
+    extractor: LegalGraphExtractor,
+    project: Optional[str] = None,
+    key_path: Optional[str] = None,
+    update_existing: bool = False,
+):
     """Process documents from BigQuery table and update with triplet extraction results"""
-    from ..bigquery_utils import BigQueryClient, parse_json_column
+    from ..utils import BigQueryClient, parse_json_column
 
     # Initialize client
     client = BigQueryClient(project=project, key_path=key_path)
@@ -340,16 +376,18 @@ async def run_bigquery(table_id: str, batch: int, extractor: LegalGraphExtractor
                 text = str(row.text)
 
                 # Parse entities
-                entities = parse_json_column(row.get('tags')) or []
+                entities = parse_json_column(row.get("tags")) or []
 
                 # Process document
                 result = await process_document(text, entities, doc_id, extractor)
 
                 # Prepare update data
-                triplets = result.get('knowledge_graph', {}).get('triplets', [])
+                triplets = result.get("knowledge_graph", {}).get("triplets", [])
                 triplets_json = json.dumps(triplets, ensure_ascii=False)
-                triplets_json_escaped = triplets_json.replace("'", "\\'").replace('"', '\\"')
-                triplets_count = result.get('triplets_count', 0)
+                triplets_json_escaped = triplets_json.replace("'", "\\'").replace(
+                    '"', '\\"'
+                )
+                triplets_count = result.get("triplets_count", 0)
 
                 # Update table
                 update_sql = f"""
@@ -361,8 +399,12 @@ async def run_bigquery(table_id: str, batch: int, extractor: LegalGraphExtractor
 
                 job_config = client.bigquery.QueryJobConfig(
                     query_parameters=[
-                        client.bigquery.ScalarQueryParameter("triplets_count", "INTEGER", triplets_count),
-                        client.bigquery.ScalarQueryParameter("doc_id", "STRING", doc_id),
+                        client.bigquery.ScalarQueryParameter(
+                            "triplets_count", "INTEGER", triplets_count
+                        ),
+                        client.bigquery.ScalarQueryParameter(
+                            "doc_id", "STRING", doc_id
+                        ),
                     ]
                 )
 
@@ -381,7 +423,7 @@ async def run_bigquery(table_id: str, batch: int, extractor: LegalGraphExtractor
 
 def check_bigquery_schema(table_id: str):
     """Check if the BigQuery table has the required columns"""
-    from ..bigquery_utils import BigQueryClient, check_legal_document_schema
+    from ..utils import BigQueryClient, check_legal_document_schema
 
     try:
         client = BigQueryClient()
@@ -389,7 +431,7 @@ def check_bigquery_schema(table_id: str):
             client=client,
             table_id=table_id,
             require_entities=True,
-            require_triplets=False
+            require_triplets=False,
         )
 
         # Get full schema for logging
@@ -413,7 +455,7 @@ def check_bigquery_schema(table_id: str):
 
 def get_bigquery_stats(table_id: str):
     """Get statistics about triplet processing status"""
-    from ..bigquery_utils import BigQueryClient, get_triplet_statistics, format_table_stats
+    from ..utils import BigQueryClient, get_triplet_statistics, format_table_stats
 
     try:
         client = BigQueryClient()
@@ -429,36 +471,79 @@ def get_bigquery_stats(table_id: str):
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Legal knowledge graph extraction from CSV or BigQuery")
-    parser.add_argument("csv_file", nargs='?', help="CSV file with legal documents")
+    parser = argparse.ArgumentParser(
+        description="Legal knowledge graph extraction from CSV or BigQuery"
+    )
+    parser.add_argument("csv_file", nargs="?", help="CSV file with legal documents")
     parser.add_argument("--output", "-o", default="results.json", help="Output file")
-    parser.add_argument("--max-docs", "-m", type=int, default=None, help="Max documents")
+    parser.add_argument(
+        "--max-docs", "-m", type=int, default=None, help="Max documents"
+    )
     parser.add_argument("--delay", "-d", type=float, default=2.0, help="API delay")
-    parser.add_argument("--visualize", "-v", action="store_true", help="Visualize graphs after processing")
-    parser.add_argument("--graph-output", default="graphs/", help="Graph output directory")
-    parser.add_argument("--min-confidence", type=float, default=0.6, help="Minimum confidence for graph edges")
-    parser.add_argument("--layout", choices=['spring', 'circular', 'hierarchical'], 
-                       default='spring', help="Graph layout")
+    parser.add_argument(
+        "--visualize",
+        "-v",
+        action="store_true",
+        help="Visualize graphs after processing",
+    )
+    parser.add_argument(
+        "--graph-output", default="graphs/", help="Graph output directory"
+    )
+    parser.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.6,
+        help="Minimum confidence for graph edges",
+    )
+    parser.add_argument(
+        "--layout",
+        choices=["spring", "circular", "hierarchical"],
+        default="spring",
+        help="Graph layout",
+    )
     parser.add_argument("--combined", action="store_true", help="Create combined graph")
-    parser.add_argument("--individual", action="store_true", help="Create individual graphs")
-    parser.add_argument("--subgraphs", action="store_true", help="Create person subgraphs")
+    parser.add_argument(
+        "--individual", action="store_true", help="Create individual graphs"
+    )
+    parser.add_argument(
+        "--subgraphs", action="store_true", help="Create person subgraphs"
+    )
     parser.add_argument("--export", action="store_true", help="Export graph data")
-    parser.add_argument("--stats", action="store_true", help="Generate graph statistics")
-    parser.add_argument("--filter-zero-triplets", action="store_true", default=True, 
-                       help="Filter out documents with zero triplets (default: True)")
-    parser.add_argument("--keep-zero-triplets", action="store_true", 
-                       help="Keep documents with zero triplets (overrides --filter-zero-triplets)")
+    parser.add_argument(
+        "--stats", action="store_true", help="Generate graph statistics"
+    )
+    parser.add_argument(
+        "--filter-zero-triplets",
+        action="store_true",
+        default=True,
+        help="Filter out documents with zero triplets (default: True)",
+    )
+    parser.add_argument(
+        "--keep-zero-triplets",
+        action="store_true",
+        help="Keep documents with zero triplets (overrides --filter-zero-triplets)",
+    )
     parser.add_argument("--debug-output", help="Directory to save debug LLM outputs")
-    
+
     # BigQuery options
     parser.add_argument("--bigquery", action="store_true", help="Use BigQuery backend")
     parser.add_argument("--bq-table", help="BigQuery table ID (project.dataset.table)")
-    parser.add_argument("--update-existing", action="store_true", help="Update existing records with triplets_count = 0")
+    parser.add_argument(
+        "--update-existing",
+        action="store_true",
+        help="Update existing records with triplets_count = 0",
+    )
     parser.add_argument("--gcp-project", help="GCP project id")
     parser.add_argument("--gcp-key", help="Path to service-account JSON key")
-    parser.add_argument("--batch", type=int, default=1000, help="Batch size for BigQuery processing")
-    parser.add_argument("--check-schema", action="store_true", help="Check BigQuery table schema")
-    parser.add_argument("--show-stats", action="store_true", help="Show BigQuery processing statistics")
+    parser.add_argument(
+        "--batch", type=int, default=1000, help="Batch size for BigQuery processing"
+    )
+    parser.add_argument(
+        "--check-schema", action="store_true", help="Check BigQuery table schema"
+    )
+    parser.add_argument(
+        "--show-stats", action="store_true", help="Show BigQuery processing statistics"
+    )
 
     args = parser.parse_args()
 
@@ -473,18 +558,20 @@ async def main():
         if not args.bq_table:
             logger.error("BigQuery mode requires --bq-table")
             return
-            
+
         # Check schema if requested
         if args.check_schema:
             if not check_bigquery_schema(args.bq_table):
-                logger.error("Table schema check failed. Please ensure required columns exist.")
+                logger.error(
+                    "Table schema check failed. Please ensure required columns exist."
+                )
                 return
-        
+
         # Show stats if requested
         if args.show_stats:
             get_bigquery_stats(args.bq_table)
             return
-            
+
         extractor = LegalGraphExtractor(debug_output=args.debug_output)
         await run_bigquery(
             table_id=args.bq_table,
@@ -492,7 +579,7 @@ async def main():
             extractor=extractor,
             project=args.gcp_project,
             key_path=args.gcp_key,
-            update_existing=args.update_existing
+            update_existing=args.update_existing,
         )
         return
 
@@ -507,12 +594,12 @@ async def main():
 
     # Load data
     df = pd.read_csv(args.csv_file)
-    if 'text' not in df.columns:
+    if "text" not in df.columns:
         logger.error("Missing 'text' column")
         return
 
     # Remove empty texts
-    df = df[df['text'].notna() & (df['text'].str.strip() != '')]
+    df = df[df["text"].notna() & (df["text"].str.strip() != "")]
 
     if args.max_docs:
         df = df.head(args.max_docs)
@@ -525,21 +612,21 @@ async def main():
     for idx, row in df.iterrows():
         logger.info(f"Processing {idx + 1}/{len(df)}")
 
-        text = str(row['text']).strip()
-        doc_id = str(row.get('doc_id', f"doc_{idx}"))
+        text = str(row["text"]).strip()
+        doc_id = str(row.get("doc_id", f"doc_{idx}"))
 
         # Get entities from 'tags' column if available
         entities = []
-        if 'tags' in df.columns and pd.notna(row['tags']):
+        if "tags" in df.columns and pd.notna(row["tags"]):
             try:
-                entities = json.loads(str(row['tags']))
+                entities = json.loads(str(row["tags"]))
             except:
                 logger.warning(f"Could not parse entities for doc {doc_id}")
 
         result = await process_document(text, entities, doc_id, extractor)
-        
+
         # Filter out zero triplets if requested
-        if filter_zero_triplets and result.get('triplets_count', 0) == 0:
+        if filter_zero_triplets and result.get("triplets_count", 0) == 0:
             logger.info(f"Skipping doc {doc_id} - no triplets extracted")
             continue
 
@@ -549,20 +636,24 @@ async def main():
             await asyncio.sleep(args.delay)
 
     # Save results
-    with open(args.output, 'w', encoding='utf-8') as f:
+    with open(args.output, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
 
-    successful = len([r for r in results if 'error' not in r])
-    total_triplets = sum(r.get('triplets_count', 0) for r in results if 'error' not in r)
-    zero_triplet_docs = len([r for r in results if r.get('triplets_count', 0) == 0])
+    successful = len([r for r in results if "error" not in r])
+    total_triplets = sum(
+        r.get("triplets_count", 0) for r in results if "error" not in r
+    )
+    zero_triplet_docs = len([r for r in results if r.get("triplets_count", 0) == 0])
 
-    logger.info(f"""
+    logger.info(
+        f"""
     Complete:
     - Successful: {successful}/{len(results)}
     - Total triplets: {total_triplets}
     - Zero triplet docs: {zero_triplet_docs}
     - Saved to: {args.output}
-    """)
+    """
+    )
 
     # Visualize graphs if requested
     if args.visualize:
@@ -576,7 +667,7 @@ async def main():
             individual=args.individual,
             subgraphs=args.subgraphs,
             export=args.export,
-            stats=args.stats
+            stats=args.stats,
         )
 
 
@@ -584,8 +675,14 @@ if __name__ == "__main__":
     if len(sys.argv) == 1:
         print("Usage examples:")
         print("  CSV mode: python __main__.py data.csv --max-docs 10 --visualize")
-        print("  BigQuery mode: python __main__.py --bigquery --bq-table lab-test-project-1-305710.court_data_2022.processing_doc_links")
-        print("  Check schema: python __main__.py --bigquery --bq-table lab-test-project-1-305710.court_data_2022.processing_doc_links --check-schema")
-        print("  Show stats: python __main__.py --bigquery --bq-table lab-test-project-1-305710.court_data_2022.processing_doc_links --show-stats")
+        print(
+            "  BigQuery mode: python __main__.py --bigquery --bq-table lab-test-project-1-305710.court_data_2022.processing_doc_links"
+        )
+        print(
+            "  Check schema: python __main__.py --bigquery --bq-table lab-test-project-1-305710.court_data_2022.processing_doc_links --check-schema"
+        )
+        print(
+            "  Show stats: python __main__.py --bigquery --bq-table lab-test-project-1-305710.court_data_2022.processing_doc_links --show-stats"
+        )
     else:
         asyncio.run(main())

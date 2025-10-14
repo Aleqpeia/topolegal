@@ -1,373 +1,697 @@
-import asyncio
+#!/usr/bin/env python3
+"""
+BigQuery Dataset Operations CLI
+
+This module provides command-line tools for BigQuery dataset operations:
+- Dataset statistics and analysis
+- Triplet reformatting (extracting JSON to columnar format)
+- Stratified train/test/val splitting
+- Split validation and distribution analysis
+
+Aligned with DATASET_REFORMATTING_GUIDE.md workflow.
+"""
+
+import argparse
 import json
-import pandas as pd
-from typing import Dict, List, Optional
-from pydantic import BaseModel
 import logging
 from pathlib import Path
-import argparse
-from datetime import datetime
-import os
-import sys
+from typing import Optional
 
-# Import corruption functionality
-from . import LegalReferenceCorruptor, DataCorruptor
-
-# Configure logging first
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
-# Import processing functions
-try:
-    from ..graph_extraction import LegalGraphExtractor, process_legal_document
-    process_document = process_legal_document  # Alias for compatibility
-except ImportError:
-    logger.warning("Graph extraction module not available. Some features may be limited.")
-    LegalGraphExtractor = None
-    process_document = None
+# Import BigQuery dataset reformatter
+from . import BigQueryDatasetReformatter
 
 
+def build_table_id(args, table_name: str) -> str:
+    """
+    Build full table ID from args.
 
-async def run_bigquery(table_id: str, batch: int, project: Optional[str] = None,
-                       key_path: Optional[str] = None, update_existing: bool = False):
-    """Process documents from BigQuery table and update with triplet extraction results"""
-    from ..bigquery_utils import BigQueryClient, parse_json_column
+    If table_name is already a full ID (contains '.'), return as-is.
+    Otherwise, use --project-id and --dataset to construct full ID.
 
-    # Initialize client
-    client = BigQueryClient(project=project, key_path=key_path)
+    Args:
+        args: Parsed command-line arguments
+        table_name: Table name or full table ID
 
-    # Initialize extractor
-    if not LegalGraphExtractor or not process_document:
-        logger.error("Graph extraction not available")
-        return
+    Returns:
+        Full table ID in format project.dataset.table
+    """
+    # If already a full table ID, return as-is
+    if "." in table_name and table_name.count(".") >= 2:
+        return table_name
 
-    extractor = LegalGraphExtractor()
+    # Otherwise, construct from global args
+    if args.project_id and args.dataset:
+        return f"{args.project_id}.{args.dataset}.{table_name}"
 
-    total = 0
-    processed = 0
-
-    # Determine WHERE clause based on update mode
-    if update_existing:
-        where_clause = "(triplets_count IS NULL OR triplets_count = 0) AND text IS NOT NULL AND tags IS NOT NULL AND LENGTH(text) > 10"
-    else:
-        where_clause = "triplets_count IS NULL AND text IS NOT NULL AND tags IS NOT NULL AND LENGTH(text) > 10"
-
-    while True:
-        # Fetch batch
-        sql = f"""
-            SELECT doc_id, text, tags, triplets_count
-            FROM `{table_id}`
-            WHERE {where_clause}
-            LIMIT {batch}
-        """
-
-        rows_df = client.query_to_dataframe(sql)
-
-        if rows_df.empty:
-            logger.info("No more documents to process")
-            break
-
-        for _, row in rows_df.iterrows():
-            try:
-                doc_id = str(row.doc_id)
-                text = str(row.text)
-
-                # Parse entities
-                entities = parse_json_column(row.get('tags')) or []
-
-                # Process document
-                result = await process_document(text, entities, doc_id, extractor)
-
-                # Prepare update data
-                triplets = result.get('knowledge_graph', {}).get('triplets', [])
-                triplets_json = json.dumps(triplets, ensure_ascii=False)
-                triplets_json_escaped = triplets_json.replace("'", "\\'").replace('"', '\\"')
-                triplets_count = result.get('triplets_count', 0)
-
-                # Update table
-                update_sql = f"""
-                    UPDATE `{table_id}`
-                    SET triplets = JSON '{triplets_json_escaped}',
-                        triplets_count = @triplets_count
-                    WHERE CAST(doc_id AS STRING) = @doc_id
-                """
-
-                job_config = client.bigquery.QueryJobConfig(
-                    query_parameters=[
-                        client.bigquery.ScalarQueryParameter("triplets_count", "INTEGER", triplets_count),
-                        client.bigquery.ScalarQueryParameter("doc_id", "STRING", doc_id),
-                    ]
-                )
-
-                update_job = client.client.query(update_sql, job_config=job_config)
-                update_job.result()
-
-                total += 1
-                logger.info(f"Processed doc {doc_id}: {triplets_count} triplets")
-
-            except Exception as e:
-                logger.error(f"BQ doc {row.doc_id}: {e}")
-
-        processed += len(rows_df)
-        logger.info(f"Processed {processed} rows in this batch, {total} successful")
+    # If no global args, assume it's already correct
+    return table_name
 
 
-def check_bigquery_schema(table_id: str):
-    """Check if the BigQuery table has the required columns"""
-    from ..bigquery_utils import BigQueryClient, check_legal_document_schema
-
-    try:
-        client = BigQueryClient()
-        is_valid, missing = check_legal_document_schema(
-            client=client,
-            table_id=table_id,
-            require_entities=True,
-            require_triplets=False
-        )
-
-        # Get full schema for logging
-        schema = client.get_table_schema(table_id)
-
-        logger.info(f"Table schema check for {table_id}:")
-        logger.info("Actual table schema:")
-        for col, col_type in schema.items():
-            logger.info(f"  {col}: {col_type}")
-
-        if not is_valid:
-            logger.error(f"Missing required columns: {missing}")
-            return False
-
-        return True
-
-    except Exception as e:
-        logger.error(f"Failed to check table schema: {e}")
-        return False
-
-
-def get_bigquery_stats(table_id: str):
-    """Get statistics about triplet processing status"""
-    from ..bigquery_utils import BigQueryClient, get_triplet_statistics, format_table_stats
-
-    try:
-        client = BigQueryClient()
-        stats = get_triplet_statistics(client, table_id)
-
-        if stats:
-            logger.info(format_table_stats(stats))
-        else:
-            logger.warning("No statistics available")
-
-    except Exception as e:
-        logger.error(f"Failed to get processing stats: {e}")
-
-
-async def corrupt_bigquery_data(table_id: str, output_table_id: str, corruption_probability: float = 0.5,
-                                project: Optional[str] = None, key_path: Optional[str] = None,
-                                batch_size: int = 100):
-    """Create a corrupted dataset from BigQuery table for binary classification training"""
-    from ..bigquery_utils import (
-        BigQueryClient, BigQueryBatchProcessor,
-        create_legal_document_table, parse_json_column
+def analyze_command(args):
+    """Analyze triplet statistics for a BigQuery table"""
+    reformatter = BigQueryDatasetReformatter(
+        project_id=args.project_id, credentials_path=args.credentials
     )
 
-    # Initialize client
-    client = BigQueryClient(project=project, key_path=key_path)
+    stats = reformatter.analyze_triplet_statistics(args.table)
 
-    # Initialize corruptor
-    corruptor = LegalReferenceCorruptor(corruption_probability=corruption_probability)
+    # Print statistics
+    print("\n" + "=" * 60)
+    print("TRIPLET STATISTICS")
+    print("=" * 60)
+    print(f"Total triplets: {stats['total_triplets']}")
+    print(f"Unique legal references: {stats['unique_legal_references']}")
+    print(f"Unique relations: {stats['unique_relations']}")
 
-    logger.info(f"Starting corruption process: {table_id} -> {output_table_id}")
-    logger.info(f"Corruption probability: {corruption_probability}")
+    print("\nTop 10 Legal References:")
+    for item in stats["legal_reference_distribution"].items():
+        print(f"  {item[0]}: {item[1]} occurrences")
 
-    # Create output table
-    create_legal_document_table(
-        client=client,
-        table_id=output_table_id,
-        include_entities=True,
-        include_triplets=True,
-        include_labels=True,
-        label_column='is_valid'
+    print("\nRelations:")
+    for item in stats["relation_distribution"].items():
+        print(f"  {item[0]}: {item[1]} occurrences")
+
+    # Save to file if requested
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            json.dump(stats, f, indent=2, ensure_ascii=False)
+        logger.info(f"Statistics saved to {args.output}")
+
+
+def reformat_command(args):
+    """Reformat dataset by extracting triplet JSON into separate columns"""
+    reformatter = BigQueryDatasetReformatter(
+        project_id=args.project_id, credentials_path=args.credentials
     )
 
-    def process_batch(batch_data):
-        """Process batch and apply corruption"""
-        dataset = []
-        for row in batch_data:
-            entities = parse_json_column(row.get('tags'))
-            triplets = parse_json_column(row.get('triplets'))
-
-            if not triplets:
-                continue
-
-            dataset.append({
-                'doc_id': str(row.get('doc_id')),
-                'text': str(row.get('text')),
-                'entities': entities or [],
-                'triplets': triplets,
-                'triplets_count': int(row.get('triplets_count', 0))
-            })
-
-        # Apply corruption
-        corrupted_dataset = corruptor.corrupt_dataset(dataset, label_column='is_valid')
-
-        # Format for insertion
-        rows_to_insert = []
-        for item in corrupted_dataset:
-            rows_to_insert.append({
-                'doc_id': item['doc_id'],
-                'text': item['text'],
-                'entities': item['entities'],
-                'triplets': item['triplets'],
-                'triplets_count': item['triplets_count'],
-                'is_valid': item['is_valid'],
-                'processing_timestamp': datetime.now().isoformat()
-            })
-
-        return rows_to_insert
-
-    # Process table using batch processor
-    processor = BigQueryBatchProcessor(client, batch_size=batch_size)
-    stats = processor.process_table(
-        table_id=table_id,
-        processor_func=process_batch,
-        output_table_id=output_table_id,
-        where_clause="triplets_count IS NOT NULL AND triplets_count > 0 AND text IS NOT NULL AND tags IS NOT NULL AND LENGTH(text) > 10"
+    reformatter.reformat_dataset(
+        source_table=args.source_table, dest_table=args.dest_table
     )
 
-    # Show final statistics
-    corruption_stats = corruptor.get_corruption_stats()
-    logger.info(f"Batch processing complete: {stats}")
-    logger.info(f"Corruption stats: {corruption_stats}")
+
+def split_command(args):
+    """Create stratified train/test/val splits"""
+    reformatter = BigQueryDatasetReformatter(
+        project_id=args.project_id, credentials_path=args.credentials
+    )
+
+    stats = reformatter.stratified_split(
+        source_table=args.source_table,
+        train_table=args.train_table,
+        test_table=args.test_table,
+        val_table=args.val_table,
+        train_ratio=args.train_ratio,
+        test_ratio=args.test_ratio,
+        val_ratio=args.val_ratio,
+        stratify_by=args.stratify_by,
+        random_seed=args.seed,
+    )
+
+    # Print split statistics
+    print("\n" + "=" * 60)
+    print("SPLIT STATISTICS")
+    print("=" * 60)
+    for split_name, split_stats in stats.items():
+        print(f"\n{split_name.upper()}:")
+        print(f"  Table: {split_stats['table']}")
+        print(f"  Unique documents: {split_stats['unique_docs']}")
+        print(f"  Total rows: {split_stats['total_rows']}")
 
 
+def validate_command(args):
+    """Validate that splits have no overlap and maintain stratification"""
+    reformatter = BigQueryDatasetReformatter(
+        project_id=args.project_id, credentials_path=args.credentials
+    )
+
+    results = reformatter.validate_split(
+        train_table=args.train_table,
+        test_table=args.test_table,
+        val_table=args.val_table,
+    )
+
+    # Print validation results
+    print("\n" + "=" * 60)
+    print("VALIDATION RESULTS")
+    print("=" * 60)
+    print(f"Valid: {'✅ YES' if results['valid'] else '❌ NO'}")
+    print(f"Overlapping documents: {results['overlapping_docs']}")
+
+    print("\nSplit Statistics:")
+    for split_name, stats in results["splits_stats"].items():
+        print(f"\n{split_name.upper()}:")
+        for key, value in stats.items():
+            print(f"  {key}: {value}")
 
 
-async def corrupt_csv_data(input_csv: str, output_csv: str, corruption_probability: float = 0.5):
-    """Create a corrupted dataset from CSV file for binary classification training"""
-    try:
-        # Load data
-        df = pd.read_csv(input_csv)
-        logger.info(f"Loaded {len(df)} documents from {input_csv}")
-        
-        # Convert to dataset format
-        dataset = []
-        for _, row in df.iterrows():
-            try:
-                entities = json.loads(row.tags) if pd.notna(row.tags) else []
-                triplets = json.loads(row.triplets) if pd.notna(row.triplets) else []
-                
-                dataset.append({
-                    'doc_id': str(row.get('doc_id', f"doc_{len(dataset)}")),
-                    'text': str(row.text),
-                    'entities': entities,
-                    'triplets': triplets,
-                    'triplets_count': len(triplets)
-                })
-            except Exception as e:
-                logger.warning(f"Error parsing row: {e}")
-                continue
-        
-        # Initialize corruptor and apply corruption
-        corruptor = LegalReferenceCorruptor(corruption_probability=corruption_probability)
-        corrupted_dataset = corruptor.corrupt_dataset(dataset, label_column='is_valid')
-        
-        # Convert back to DataFrame and save
-        output_data = []
-        for item in corrupted_dataset:
-            output_data.append({
-                'doc_id': item['doc_id'],
-                'text': item['text'],
-                'tags': json.dumps(item['entities'], ensure_ascii=False),
-                'triplets': json.dumps(item['triplets'], ensure_ascii=False),
-                'triplets_count': item['triplets_count'],
-                'is_valid': item['is_valid']
-            })
-        
-        output_df = pd.DataFrame(output_data)
-        output_df.to_csv(output_csv, index=False)
-        
-        # Show statistics
-        stats = corruptor.get_corruption_stats()
-        logger.info(f"Corruption complete! Saved to {output_csv}")
-        logger.info(f"Total samples: {len(output_df)}")
-        logger.info(f"Valid samples: {len(output_df[output_df['is_valid']])}")
-        logger.info(f"Corrupted samples: {len(output_df[~output_df['is_valid']])}")
-        logger.info(f"Corruption stats: {stats}")
-        
-    except Exception as e:
-        logger.error(f"Error processing CSV: {e}")
+def create_grouped_view_command(args):
+    """Create grouped view with normalized legal references and relations"""
+    reformatter = BigQueryDatasetReformatter(
+        project_id=args.project_id, credentials_path=args.credentials
+    )
+
+    reformatter.create_grouped_view(
+        source_table=args.source_table, view_name=args.view_name, strategy=args.strategy
+    )
+
+
+def create_grouping_stats_command(args):
+    """Create grouping statistics views"""
+    reformatter = BigQueryDatasetReformatter(
+        project_id=args.project_id, credentials_path=args.credentials
+    )
+
+    reformatter.create_grouping_stats_views(grouped_view=args.grouped_view)
+
+
+def analyze_grouping_command(args):
+    """Analyze grouping improvement"""
+    reformatter = BigQueryDatasetReformatter(
+        project_id=args.project_id, credentials_path=args.credentials
+    )
+
+    stats = reformatter.analyze_grouping_improvement(
+        source_table=args.source_table, grouped_view=args.grouped_view
+    )
+
+    # Print analysis results
+    print("\n" + "=" * 60)
+    print("GROUPING IMPROVEMENT ANALYSIS")
+    print("=" * 60)
+    print(f"\nLegal References:")
+    print(f"  Original: {stats['legal_refs_original']}")
+    print(f"  Grouped: {stats['legal_refs_grouped']}")
+    print(
+        f"  Reduction: {stats['legal_ref_reduction']} ({stats['legal_ref_reduction_pct']}%)"
+    )
+    print(f"\nRelations:")
+    print(f"  Original: {stats['relations_original']}")
+    print(f"  Grouped: {stats['relations_grouped']}")
+    print(
+        f"  Reduction: {stats['relation_reduction']} ({stats['relation_reduction_pct']}%)"
+    )
+    print(f"\nTotal triplets: {stats['total_triplets']}")
+
+
+def create_grouped_splits_command(args):
+    """Create grouped train/test/val splits"""
+    reformatter = BigQueryDatasetReformatter(
+        project_id=args.project_id, credentials_path=args.credentials
+    )
+
+    reformatter.create_grouped_splits(
+        grouped_view=args.grouped_view,
+        train_table=args.train_table,
+        test_table=args.test_table,
+        val_table=args.val_table,
+    )
+
+
+def export_high_frequency_command(args):
+    """Export high-frequency combinations"""
+    reformatter = BigQueryDatasetReformatter(
+        project_id=args.project_id, credentials_path=args.credentials
+    )
+
+    reformatter.export_high_frequency_combinations(
+        grouped_view=args.grouped_view,
+        output_table=args.output_table,
+        percentile=args.percentile,
+    )
+
+
+# ============================================================================
+# Array-Based Commands
+# ============================================================================
+
+
+def array_reformat_command(args):
+    """Reformat to array-based format (80% storage reduction)"""
+    reformatter = BigQueryDatasetReformatter(
+        project_id=args.project_id, credentials_path=args.credentials
+    )
+
+    # Build table IDs
+    source = build_table_id(args, args.source_table)
+    dest = build_table_id(args, args.dest_table)
+
+    reformatter.reformat_to_arrays(source_table=source, dest_table=dest)
+
+
+def array_flatten_command(args):
+    """Create flattened view from array table"""
+    reformatter = BigQueryDatasetReformatter(
+        project_id=args.project_id, credentials_path=args.credentials
+    )
+
+    # Build table IDs
+    array_table = build_table_id(args, args.array_table)
+    view_name = build_table_id(args, args.view_name)
+
+    reformatter.create_flattened_view(array_table=array_table, view_name=view_name)
+
+
+def array_analyze_command(args):
+    """Analyze array-based table statistics"""
+    reformatter = BigQueryDatasetReformatter(
+        project_id=args.project_id, credentials_path=args.credentials
+    )
+
+    # Build table ID
+    array_table = build_table_id(args, args.array_table)
+
+    stats = reformatter.analyze_array_statistics(array_table)
+
+    # Print detailed stats
+    print("\n" + "=" * 60)
+    print("ARRAY-BASED TABLE STATISTICS")
+    print("=" * 60)
+    print(f"\nStorage Efficiency:")
+    print(f"  Array rows: {stats['array_rows']}")
+    print(f"  Row-based equivalent: {stats['row_based_equivalent']}")
+    print(f"  Storage reduction: {stats['storage_reduction_pct']:.1f}%")
+    print(f"\nTriplet Statistics:")
+    print(f"  Total triplets: {stats['total_triplets']}")
+    print(f"  Avg per doc: {stats['avg_triplets_per_doc']:.1f}")
+    print(f"  Min per doc: {stats['min_triplets_per_doc']}")
+    print(f"  Max per doc: {stats['max_triplets_per_doc']}")
+    print(f"\nGrouping (Pre-computed in Array):")
+    print(
+        f"  Legal refs: {stats['unique_legal_refs_original']} → {stats['unique_legal_refs_grouped']} ({stats['legal_ref_reduction_pct']:.1f}% reduction)"
+    )
+    print(
+        f"  Relations: {stats['unique_relations_original']} → {stats['unique_relations_grouped']} ({stats['relation_reduction_pct']:.1f}% reduction)"
+    )
+
+
+def array_workflow_command(args):
+    """Run complete array-based workflow"""
+    reformatter = BigQueryDatasetReformatter(
+        project_id=args.project_id, credentials_path=args.credentials
+    )
+
+    # Build table IDs
+    source = build_table_id(args, args.source_table)
+    array_table = build_table_id(args, args.array_table)
+    flattened_view = build_table_id(args, args.flattened_view)
+
+    logger.info("Starting array-based reformatting workflow...")
+
+    # Step 1: Reformat to arrays
+    logger.info("Step 1: Reformatting to array format...")
+    reformatter.reformat_to_arrays(source_table=source, dest_table=array_table)
+
+    # Step 2: Create flattened view
+    logger.info("Step 2: Creating flattened view...")
+    reformatter.create_flattened_view(array_table=array_table, view_name=flattened_view)
+
+    # Step 3: Analyze statistics
+    logger.info("Step 3: Analyzing statistics...")
+    stats = reformatter.analyze_array_statistics(array_table)
+
+    # Summary
+    print("\n" + "=" * 60)
+    print("ARRAY-BASED WORKFLOW COMPLETE")
+    print("=" * 60)
+    print(f"✅ Array table created: {array_table}")
+    print(f"   Storage reduction: {stats['storage_reduction_pct']:.1f}%")
+    print(
+        f"   {stats['array_rows']} rows (vs {stats['row_based_equivalent']} in row-based)"
+    )
+    print(f"✅ Flattened view created: {flattened_view}")
+    print(f"   Use this view with GraphDataset for training")
+    print(f"✅ Grouping pre-computed:")
+    print(f"   Legal refs: {stats['legal_ref_reduction_pct']:.1f}% reduction")
+    print(f"   Relations: {stats['relation_reduction_pct']:.1f}% reduction")
+
+
+def workflow_command(args):
+    """Run complete dataset reformatting workflow"""
+    reformatter = BigQueryDatasetReformatter(
+        project_id=args.project_id, credentials_path=args.credentials
+    )
+
+    logger.info("Starting complete dataset reformatting workflow...")
+
+    # Step 1: Analyze source data
+    logger.info("Step 1: Analyzing source data...")
+    stats = reformatter.analyze_triplet_statistics(args.source_table)
+    logger.info(f"  - Total triplets: {stats['total_triplets']}")
+    logger.info(f"  - Unique legal references: {stats['unique_legal_references']}")
+
+    # Step 2: Reformat dataset
+    logger.info("Step 2: Reformatting dataset...")
+    reformatter.reformat_dataset(
+        source_table=args.source_table, dest_table=args.reformatted_table
+    )
+
+    # Step 3: Create stratified splits
+    logger.info("Step 3: Creating stratified splits...")
+    split_stats = reformatter.stratified_split(
+        source_table=args.reformatted_table,
+        train_table=args.train_table,
+        test_table=args.test_table,
+        val_table=args.val_table,
+        train_ratio=0.7,
+        test_ratio=0.2,
+        val_ratio=0.1,
+        stratify_by=args.stratify_by,
+        random_seed=42,
+    )
+
+    # Step 4: Validate splits
+    logger.info("Step 4: Validating splits...")
+    validation = reformatter.validate_split(
+        train_table=args.train_table,
+        test_table=args.test_table,
+        val_table=args.val_table,
+    )
+
+    # Step 5: Create basic grouping view
+    logger.info("Step 5: Creating basic grouping view...")
+    reformatter.create_grouped_view(
+        source_table=args.reformatted_table,
+        view_name=args.grouping_view,
+        strategy="base_article",
+    )
+
+    # Summary
+    print("\n" + "=" * 60)
+    print("WORKFLOW COMPLETE")
+    print("=" * 60)
+    print(f"✅ Source analyzed: {stats['total_triplets']} triplets")
+    print(f"✅ Dataset reformatted: {args.reformatted_table}")
+    print(f"✅ Splits created: train={split_stats['train']['unique_docs']} docs")
+    print(f"✅ Validation: {'PASSED' if validation['valid'] else 'FAILED'}")
+    print(f"✅ Grouping view created: {args.grouping_view}")
+
+
+def grouping_workflow_command(args):
+    """Run complete grouping workflow"""
+    reformatter = BigQueryDatasetReformatter(
+        project_id=args.project_id, credentials_path=args.credentials
+    )
+
+    logger.info("Starting complete grouping workflow...")
+
+    # Step 1: Create grouped view
+    logger.info(f"Step 1: Creating grouped view with '{args.strategy}' strategy...")
+    reformatter.create_grouped_view(
+        source_table=args.source_table, view_name=args.view_name, strategy=args.strategy
+    )
+
+    # Step 2: Create grouping statistics views
+    logger.info("Step 2: Creating grouping statistics views...")
+    full_view_name = f"{reformatter.client.project}.{args.source_table.split('.')[1]}.{args.view_name}"
+    reformatter.create_grouping_stats_views(grouped_view=full_view_name)
+
+    # Step 3: Analyze grouping improvement
+    logger.info("Step 3: Analyzing grouping improvement...")
+    stats = reformatter.analyze_grouping_improvement(
+        source_table=args.source_table, grouped_view=full_view_name
+    )
+
+    # Step 4: Create grouped splits
+    logger.info("Step 4: Creating grouped train/test/val splits...")
+    reformatter.create_grouped_splits(
+        grouped_view=full_view_name,
+        train_table=args.train_table,
+        test_table=args.test_table,
+        val_table=args.val_table,
+    )
+
+    # Step 5: Export high-frequency combinations
+    logger.info("Step 5: Exporting high-frequency combinations...")
+    reformatter.export_high_frequency_combinations(
+        grouped_view=full_view_name,
+        output_table="triplets_high_frequency",
+        percentile=80,
+    )
+
+    # Summary
+    print("\n" + "=" * 60)
+    print("GROUPING WORKFLOW COMPLETE")
+    print("=" * 60)
+    print(f"✅ Grouped view created: {full_view_name}")
+    print(f"   Strategy: {args.strategy}")
+    print(
+        f"   Legal refs: {stats['legal_refs_original']} → {stats['legal_refs_grouped']} ({stats['legal_ref_reduction_pct']}% reduction)"
+    )
+    print(
+        f"   Relations: {stats['relations_original']} → {stats['relations_grouped']} ({stats['relation_reduction_pct']}% reduction)"
+    )
+    print(f"✅ Statistics views created")
+    print(f"✅ Grouped splits created (train_grouped, test_grouped, val_grouped)")
+    print(f"✅ High-frequency combinations exported")
 
 
 def main():
     """Main CLI entry point"""
-    parser = argparse.ArgumentParser(description="Legal Data Balance and Corruption Tool")
-    subparsers = parser.add_subparsers(dest='command', help='Available commands')
-    
-    # BigQuery processing command
-    bigquery_parser = subparsers.add_parser('bigquery', help='Process BigQuery data')
-    bigquery_parser.add_argument('table_id', help='BigQuery table ID (project.dataset.table)')
-    bigquery_parser.add_argument('--batch', type=int, default=100, help='Batch size for processing')
-    bigquery_parser.add_argument('--project', help='Google Cloud Project ID')
-    bigquery_parser.add_argument('--key-path', help='Path to service account key file')
-    bigquery_parser.add_argument('--update-existing', action='store_true', help='Update existing records')
-    
-    # BigQuery corruption command
-    corrupt_bq_parser = subparsers.add_parser('corrupt-bigquery', help='Create corrupted dataset from BigQuery')
-    corrupt_bq_parser.add_argument('input_table', help='Input BigQuery table ID')
-    corrupt_bq_parser.add_argument('output_table', help='Output BigQuery table ID')
-    corrupt_bq_parser.add_argument('--probability', type=float, default=0.5, help='Corruption probability (0.0-1.0)')
-    corrupt_bq_parser.add_argument('--batch-size', type=int, default=100, help='Batch size for processing')
-    corrupt_bq_parser.add_argument('--project', help='Google Cloud Project ID')
-    corrupt_bq_parser.add_argument('--key-path', help='Path to service account key file')
-    
-    # CSV corruption command
-    corrupt_csv_parser = subparsers.add_parser('corrupt-csv', help='Create corrupted dataset from CSV')
-    corrupt_csv_parser.add_argument('input_csv', help='Input CSV file path')
-    corrupt_csv_parser.add_argument('output_csv', help='Output CSV file path')
-    corrupt_csv_parser.add_argument('--probability', type=float, default=0.5, help='Corruption probability (0.0-1.0)')
-    
-    # Schema check command
-    schema_parser = subparsers.add_parser('check-schema', help='Check BigQuery table schema')
-    schema_parser.add_argument('table_id', help='BigQuery table ID')
-    
-    # Stats command
-    stats_parser = subparsers.add_parser('stats', help='Get BigQuery table statistics')
-    stats_parser.add_argument('table_id', help='BigQuery table ID')
-    
+    parser = argparse.ArgumentParser(
+        description="BigQuery Dataset Operations for Legal Graph Training",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Analyze dataset
+  python -m legal_graph.processors.balance analyze project.dataset.table
+
+  # Create grouped view with enhanced strategy (86.7% reduction)
+  python -m legal_graph.processors.balance create-grouped-view \\
+      --project-id project-id --dataset dataset table_name --strategy enhanced
+
+  # Run complete grouping workflow
+  python -m legal_graph.processors.balance grouping-workflow \\
+      --project-id project-id --credentials key.json \\
+      project.dataset.reformatted project.dataset.train \\
+      project.dataset.test project.dataset.val
+        """,
+    )
+
+    # Global arguments
+    parser.add_argument(
+        "--project-id", help="GCP project ID (alternative to full table IDs)"
+    )
+    parser.add_argument(
+        "--dataset",
+        help="BigQuery dataset name (used with --project-id for shorter table references)",
+    )
+    parser.add_argument("--credentials", help="Path to service account JSON")
+
+    # Subcommands
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # Analyze command
+    analyze_parser = subparsers.add_parser("analyze", help="Analyze triplet statistics")
+    analyze_parser.add_argument(
+        "table", help="Table ID to analyze (project.dataset.table)"
+    )
+    analyze_parser.add_argument("--output", help="Output JSON file for statistics")
+    analyze_parser.set_defaults(func=analyze_command)
+
+    # Reformat command
+    reformat_parser = subparsers.add_parser("reformat", help="Reformat dataset")
+    reformat_parser.add_argument("source_table", help="Source table ID")
+    reformat_parser.add_argument("dest_table", help="Destination table ID")
+    reformat_parser.set_defaults(func=reformat_command)
+
+    # Split command
+    split_parser = subparsers.add_parser("split", help="Create train/test/val splits")
+    split_parser.add_argument("source_table", help="Reformatted source table")
+    split_parser.add_argument("train_table", help="Training table destination")
+    split_parser.add_argument("test_table", help="Test table destination")
+    split_parser.add_argument("val_table", help="Validation table destination")
+    split_parser.add_argument(
+        "--train-ratio", type=float, default=0.7, help="Training ratio (default: 0.7)"
+    )
+    split_parser.add_argument(
+        "--test-ratio", type=float, default=0.2, help="Test ratio (default: 0.2)"
+    )
+    split_parser.add_argument(
+        "--val-ratio", type=float, default=0.1, help="Validation ratio (default: 0.1)"
+    )
+    split_parser.add_argument(
+        "--stratify-by",
+        default="legal_reference",
+        help="Column to stratify by (default: legal_reference)",
+    )
+    split_parser.add_argument(
+        "--seed", type=int, default=42, help="Random seed (default: 42)"
+    )
+    split_parser.set_defaults(func=split_command)
+
+    # Validate command
+    validate_parser = subparsers.add_parser("validate", help="Validate splits")
+    validate_parser.add_argument("train_table", help="Training table")
+    validate_parser.add_argument("test_table", help="Test table")
+    validate_parser.add_argument("val_table", help="Validation table")
+    validate_parser.set_defaults(func=validate_command)
+
+    # Create grouped view command
+    grouped_view_parser = subparsers.add_parser(
+        "create-grouped-view", help="Create grouped view with normalized references"
+    )
+    grouped_view_parser.add_argument("source_table", help="Reformatted table")
+    grouped_view_parser.add_argument(
+        "--view-name",
+        default="triplets_grouped",
+        help="View name (default: triplets_grouped)",
+    )
+    grouped_view_parser.add_argument(
+        "--strategy",
+        choices=["base_article", "enhanced"],
+        default="enhanced",
+        help="Grouping strategy (default: enhanced = 86.7%% reduction)",
+    )
+    grouped_view_parser.set_defaults(func=create_grouped_view_command)
+
+    # Create grouping stats views command
+    grouping_stats_parser = subparsers.add_parser(
+        "create-grouping-stats", help="Create grouping statistics views"
+    )
+    grouping_stats_parser.add_argument(
+        "--grouped-view",
+        default="triplets_grouped",
+        help="Grouped view name (default: triplets_grouped)",
+    )
+    grouping_stats_parser.set_defaults(func=create_grouping_stats_command)
+
+    # Analyze grouping improvement command
+    analyze_grouping_parser = subparsers.add_parser(
+        "analyze-grouping", help="Analyze grouping improvement"
+    )
+    analyze_grouping_parser.add_argument(
+        "source_table", help="Original reformatted table"
+    )
+    analyze_grouping_parser.add_argument(
+        "--grouped-view",
+        default="triplets_grouped",
+        help="Grouped view name (default: triplets_grouped)",
+    )
+    analyze_grouping_parser.set_defaults(func=analyze_grouping_command)
+
+    # Create grouped splits command
+    grouped_splits_parser = subparsers.add_parser(
+        "create-grouped-splits", help="Create grouped train/test/val splits"
+    )
+    grouped_splits_parser.add_argument(
+        "--grouped-view", default="triplets_grouped", help="Grouped view name"
+    )
+    grouped_splits_parser.add_argument("train_table", help="Original training table")
+    grouped_splits_parser.add_argument("test_table", help="Original test table")
+    grouped_splits_parser.add_argument("val_table", help="Original validation table")
+    grouped_splits_parser.set_defaults(func=create_grouped_splits_command)
+
+    # Export high-frequency combinations command
+    export_parser = subparsers.add_parser(
+        "export-high-frequency", help="Export high-frequency combinations"
+    )
+    export_parser.add_argument(
+        "--grouped-view", default="triplets_grouped", help="Grouped view name"
+    )
+    export_parser.add_argument(
+        "--output-table",
+        default="triplets_high_frequency",
+        help="Output table name (default: triplets_high_frequency)",
+    )
+    export_parser.add_argument(
+        "--percentile",
+        type=int,
+        default=80,
+        help="Percentile threshold (default: 80 = top 20%%)",
+    )
+    export_parser.set_defaults(func=export_high_frequency_command)
+
+    # Workflow command (complete pipeline)
+    workflow_parser = subparsers.add_parser(
+        "workflow", help="Run complete reformatting workflow"
+    )
+    workflow_parser.add_argument("source_table", help="Source table ID")
+    workflow_parser.add_argument("reformatted_table", help="Reformatted table ID")
+    workflow_parser.add_argument("train_table", help="Training table destination")
+    workflow_parser.add_argument("test_table", help="Test table destination")
+    workflow_parser.add_argument("val_table", help="Validation table destination")
+    workflow_parser.add_argument("grouping_view", help="Grouping view name")
+    workflow_parser.add_argument(
+        "--stratify-by",
+        default="legal_reference",
+        help="Column to stratify by (default: legal_reference)",
+    )
+    workflow_parser.set_defaults(func=workflow_command)
+
+    # Grouping workflow command (complete grouping pipeline)
+    grouping_workflow_parser = subparsers.add_parser(
+        "grouping-workflow", help="Run complete grouping workflow"
+    )
+    grouping_workflow_parser.add_argument(
+        "source_table", help="Reformatted source table"
+    )
+    grouping_workflow_parser.add_argument("train_table", help="Original training table")
+    grouping_workflow_parser.add_argument("test_table", help="Original test table")
+    grouping_workflow_parser.add_argument("val_table", help="Original validation table")
+    grouping_workflow_parser.add_argument(
+        "--strategy",
+        choices=["base_article", "enhanced"],
+        default="enhanced",
+        help="Grouping strategy (default: enhanced)",
+    )
+    grouping_workflow_parser.add_argument(
+        "--view-name",
+        default="triplets_grouped",
+        help="View name (default: triplets_grouped)",
+    )
+    grouping_workflow_parser.set_defaults(func=grouping_workflow_command)
+
+    # Array-based reformatting commands
+    array_reformat_parser = subparsers.add_parser(
+        "array-reformat", help="Reformat to array format (80%% storage reduction)"
+    )
+    array_reformat_parser.add_argument("source_table", help="Source table")
+    array_reformat_parser.add_argument("dest_table", help="Destination array table")
+    array_reformat_parser.set_defaults(func=array_reformat_command)
+
+    array_flatten_parser = subparsers.add_parser(
+        "array-flatten", help="Create flattened view from array table"
+    )
+    array_flatten_parser.add_argument("array_table", help="Array table")
+    array_flatten_parser.add_argument(
+        "view_name", help="View name for flattened access"
+    )
+    array_flatten_parser.set_defaults(func=array_flatten_command)
+
+    array_analyze_parser = subparsers.add_parser(
+        "array-analyze", help="Analyze array-based table statistics"
+    )
+    array_analyze_parser.add_argument("array_table", help="Array table to analyze")
+    array_analyze_parser.set_defaults(func=array_analyze_command)
+
+    array_workflow_parser = subparsers.add_parser(
+        "array-workflow", help="Complete array-based workflow (recommended)"
+    )
+    array_workflow_parser.add_argument("source_table", help="Source table")
+    array_workflow_parser.add_argument(
+        "--array-table",
+        default="reformatted_array",
+        help="Array table name (default: reformatted_array)",
+    )
+    array_workflow_parser.add_argument(
+        "--flattened-view",
+        default="reformatted_flattened",
+        help="Flattened view name (default: reformatted_flattened)",
+    )
+    array_workflow_parser.set_defaults(func=array_workflow_command)
+
+    # Parse arguments
     args = parser.parse_args()
-    
-    if args.command == 'bigquery':
-        asyncio.run(run_bigquery(
-            table_id=args.table_id,
-            batch=args.batch,
-            project=args.project,
-            key_path=args.key_path,
-            update_existing=args.update_existing
-        ))
-    
-    elif args.command == 'corrupt-bigquery':
-        asyncio.run(corrupt_bigquery_data(
-            table_id=args.input_table,
-            output_table_id=args.output_table,
-            corruption_probability=args.probability,
-            project=args.project,
-            key_path=args.key_path,
-            batch_size=args.batch_size
-        ))
-    
-    elif args.command == 'corrupt-csv':
-        asyncio.run(corrupt_csv_data(
-            input_csv=args.input_csv,
-            output_csv=args.output_csv,
-            corruption_probability=args.probability
-        ))
-    
-    elif args.command == 'check-schema':
-        check_bigquery_schema(args.table_id)
-    
-    elif args.command == 'stats':
-        get_bigquery_stats(args.table_id)
-    
+
+    # Execute command
+    if hasattr(args, "func"):
+        args.func(args)
     else:
         parser.print_help()
 

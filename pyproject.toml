@@ -10,34 +10,23 @@ readme = "README.md"
 packages = [{ include = "legal_graph", from = "src" }]
 
 [tool.poetry.dependencies]
-python = ">=3.10,<4.0"
+python = ">=3.10,<3.14"
 pydantic = "^2.0.0"
-langchain-community = "^0.0.29"
-langchain = "^0.1.0"
+langchain = "^0.3.27"
 openai = "^1.0.0"
 networkx = "^3.0"
-numpy = "^1.26.0"
 pandas = "^2.0.3"
 matplotlib = "^3.7.3"
 seaborn = "^0.12.2"
 tqdm = "^4.66.1"
-nltk = "^3.8.1"
 datasets = "^2.14.6"
-spacy = "^3.7.2"
 scipy = "^1.13.0"
+langchain-community = "^0.3.27"
 google-cloud-bigquery = "^3.24.0"
 db-dtypes = "^1.0.0"
 google-cloud-bigquery-storage = "^2.24.0"
+blis = "1.0.2"
 
-
-[[tool.poetry.source]]
-name = "pypi"
-priority = "primary"
-
-[[tool.poetry.source]]
-name = "pyg"
-url = "https://data.pyg.org/whl/torch-2.5.0+cpu.html"
-priority = "explicit"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]

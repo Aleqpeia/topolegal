@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 try:
     from .entities import BaseMatcherComponent
+
     ENTITIES_AVAILABLE = True
 except ImportError as e:
     logger.warning(f"Entities module not fully available: {e}")
@@ -46,8 +47,9 @@ try:
         process_legal_document,
         visualize_graphs,
         filter_zero_triplets,
-        analyze_results
+        analyze_results,
     )
+
     GRAPH_EXTRACTION_AVAILABLE = True
 except ImportError as e:
     logger.warning(f"Graph extraction module not fully available: {e}")
@@ -62,19 +64,23 @@ except ImportError as e:
     GRAPH_EXTRACTION_AVAILABLE = False
 
 # ============================================================================
-# Data Corruption and Balance
+# BigQuery Dataset Operations (Balance Module)
 # ============================================================================
 
 try:
     from .balance import (
+        BigQueryDatasetReformatter,
+        # Backward compatibility for deprecated corruption functionality
         DataCorruptor,
         LegalReferenceCorruptor,
         CorruptionResult,
-        BinaryClassificationCorruptor  # Backward compatibility
+        BinaryClassificationCorruptor,
     )
+
     BALANCE_AVAILABLE = True
 except ImportError as e:
     logger.warning(f"Balance module not fully available: {e}")
+    BigQueryDatasetReformatter = None
     DataCorruptor = None
     LegalReferenceCorruptor = None
     CorruptionResult = None
@@ -100,8 +106,9 @@ try:
         CONSERVATIVE_STRATEGY,
         AGGRESSIVE_STRATEGY,
         create_strategy,
-        create_negative_samples
+        create_negative_samples,
     )
+
     NEGATIVE_SAMPLING_AVAILABLE = True
 except ImportError as e:
     logger.warning(f"Negative sampling module not fully available: {e}")
@@ -126,15 +133,16 @@ except ImportError as e:
 # ============================================================================
 
 try:
-    from .bigquery_utils import (
+    from .utils import (
         BigQueryClient,
         BigQueryBatchProcessor,
         create_legal_document_table,
         check_legal_document_schema,
         get_triplet_statistics,
         parse_json_column,
-        format_table_stats
+        format_table_stats,
     )
+
     BIGQUERY_UTILS_AVAILABLE = True
 except ImportError as e:
     logger.warning(f"BigQuery utilities not fully available: {e}")
@@ -148,19 +156,19 @@ except ImportError as e:
     BIGQUERY_UTILS_AVAILABLE = False
 
 
-
 # ============================================================================
 # Unified Document Processor
 # ============================================================================
 
+
 class DocumentProcessor:
     """
     Unified interface for legal document processing.
-    
+
     Combines entity extraction, knowledge graph generation, and optional corruption
     for comprehensive legal document analysis.
     """
-    
+
     def __init__(
         self,
         model_name: str = "gpt-4.1-nano",
@@ -170,9 +178,9 @@ class DocumentProcessor:
         enable_corruption: bool = False,
         corruption_probability: float = 0.5,
         enable_negative_sampling: bool = False,
-        sampling_strategy: str = 'mixed',
+        sampling_strategy: str = "mixed",
         sampling_probability: float = 0.5,
-        temperature: float = 0.8
+        temperature: float = 0.8,
     ):
         """
         Initialize the unified document processor.
@@ -199,6 +207,7 @@ class DocumentProcessor:
         if use_spacy and ENTITIES_AVAILABLE:
             try:
                 import spacy
+
                 self.nlp = spacy.load(spacy_model)
                 logger.info(f"Loaded spaCy model: {spacy_model}")
             except Exception as e:
@@ -210,8 +219,7 @@ class DocumentProcessor:
         if GRAPH_EXTRACTION_AVAILABLE:
             try:
                 self.graph_extractor = LegalGraphExtractor(
-                    model_name=model_name,
-                    temperature=temperature
+                    model_name=model_name, temperature=temperature
                 )
                 logger.info(f"Initialized graph extractor with model: {model_name}")
             except Exception as e:
@@ -224,7 +232,9 @@ class DocumentProcessor:
                 self.corruptor = LegalReferenceCorruptor(
                     corruption_probability=corruption_probability
                 )
-                logger.info(f"Initialized data corruptor with probability: {corruption_probability}")
+                logger.info(
+                    f"Initialized data corruptor with probability: {corruption_probability}"
+                )
             except Exception as e:
                 logger.warning(f"Failed to initialize corruptor: {e}")
 
@@ -234,24 +244,26 @@ class DocumentProcessor:
             try:
                 self.negative_sampler = NegativeSampler(
                     sampling_probability=sampling_probability,
-                    strategy=sampling_strategy
+                    strategy=sampling_strategy,
                 )
-                logger.info(f"Initialized negative sampler with strategy: {sampling_strategy}")
+                logger.info(
+                    f"Initialized negative sampler with strategy: {sampling_strategy}"
+                )
             except Exception as e:
                 logger.warning(f"Failed to initialize negative sampler: {e}")
-    
+
     def extract_entities(self, text: str) -> List[Dict]:
         """
         Extract entities from text using the configured method.
-        
+
         Args:
             text: Input text to process
-            
+
         Returns:
             List of entity dictionaries with keys: text, label, start, end
         """
         entities = []
-        
+
         if self.custom_entity_extractor:
             entities = self.custom_entity_extractor(text)
         elif self.use_spacy and self.nlp:
@@ -262,49 +274,52 @@ class DocumentProcessor:
                     "text": ent.text,
                     "label": ent.label_,
                     "start": ent.start_char,
-                    "end": ent.end_char
+                    "end": ent.end_char,
                 }
                 for ent in doc.ents
             ]
         else:
             logger.warning("No entity extraction method configured")
-        
+
         return entities
-    
-    async def extract_knowledge_graph(self, text: str, entities: Optional[List[Dict]] = None) -> Optional[LegalKnowledgeGraph]:
+
+    async def extract_knowledge_graph(
+        self, text: str, entities: Optional[List[Dict]] = None
+    ) -> Optional[LegalKnowledgeGraph]:
         """
         Extract knowledge graph from text and entities.
-        
+
         Args:
             text: Input text
             entities: Optional pre-extracted entities (will extract if not provided)
-            
+
         Returns:
             LegalKnowledgeGraph object or None if extraction fails
         """
         if not self.graph_extractor:
             logger.error("Graph extractor not available")
             return None
-        
+
         if entities is None:
             entities = self.extract_entities(text)
-        
+
         try:
             return await self.graph_extractor.extract_triplets(text, entities)
         except Exception as e:
             logger.error(f"Failed to extract knowledge graph: {e}")
             return None
-    
-    async def process_document(self, text: str, extract_entities: bool = True, 
-                              extract_graph: bool = True) -> Dict:
+
+    async def process_document(
+        self, text: str, extract_entities: bool = True, extract_graph: bool = True
+    ) -> Dict:
         """
         Comprehensive document processing.
-        
+
         Args:
             text: Input text to process
             extract_entities: Whether to extract entities
             extract_graph: Whether to extract knowledge graph
-            
+
         Returns:
             Dictionary containing processing results
         """
@@ -312,9 +327,9 @@ class DocumentProcessor:
             "text": text,
             "entities": [],
             "knowledge_graph": None,
-            "processing_stats": {}
+            "processing_stats": {},
         }
-        
+
         # Extract entities
         if extract_entities:
             try:
@@ -323,7 +338,7 @@ class DocumentProcessor:
                 logger.info(f"Extracted {len(result['entities'])} entities")
             except Exception as e:
                 logger.error(f"Entity extraction failed: {e}")
-        
+
         # Extract knowledge graph
         if extract_graph and self.graph_extractor:
             try:
@@ -331,14 +346,18 @@ class DocumentProcessor:
                 if kg:
                     result["knowledge_graph"] = kg
                     result["processing_stats"]["triplets_count"] = len(kg.triplets)
-                    result["processing_stats"]["legal_references"] = len(kg.legal_references)
+                    result["processing_stats"]["legal_references"] = len(
+                        kg.legal_references
+                    )
                     logger.info(f"Extracted {len(kg.triplets)} triplets")
             except Exception as e:
                 logger.error(f"Knowledge graph extraction failed: {e}")
-        
+
         return result
-    
-    def corrupt_data(self, dataset: List[Dict], label_column: str = "is_valid") -> List[Dict]:
+
+    def corrupt_data(
+        self, dataset: List[Dict], label_column: str = "is_valid"
+    ) -> List[Dict]:
         """
         Apply data corruption to a dataset (balance module).
 
@@ -359,7 +378,9 @@ class DocumentProcessor:
             logger.error(f"Data corruption failed: {e}")
             return dataset
 
-    def create_negative_samples(self, dataset: List[Dict], label_column: str = "is_valid") -> List[Dict]:
+    def create_negative_samples(
+        self, dataset: List[Dict], label_column: str = "is_valid"
+    ) -> List[Dict]:
         """
         Create negative samples from a dataset using negative sampling.
 
@@ -375,7 +396,9 @@ class DocumentProcessor:
             return dataset
 
         try:
-            return self.negative_sampler.create_negative_samples(dataset, label_column=label_column)
+            return self.negative_sampler.create_negative_samples(
+                dataset, label_column=label_column
+            )
         except Exception as e:
             logger.error(f"Negative sampling failed: {e}")
             return dataset
@@ -383,55 +406,67 @@ class DocumentProcessor:
     def get_capabilities(self) -> Dict[str, bool]:
         """Get information about available capabilities."""
         return {
-            "entity_extraction": ENTITIES_AVAILABLE and (self.use_spacy or self.custom_entity_extractor is not None),
-            "knowledge_graph_extraction": GRAPH_EXTRACTION_AVAILABLE and self.graph_extractor is not None,
+            "entity_extraction": ENTITIES_AVAILABLE
+            and (self.use_spacy or self.custom_entity_extractor is not None),
+            "knowledge_graph_extraction": GRAPH_EXTRACTION_AVAILABLE
+            and self.graph_extractor is not None,
             "data_corruption": BALANCE_AVAILABLE and self.corruptor is not None,
-            "negative_sampling": NEGATIVE_SAMPLING_AVAILABLE and self.negative_sampler is not None,
-            "spacy_available": self.use_spacy and self.nlp is not None
+            "negative_sampling": NEGATIVE_SAMPLING_AVAILABLE
+            and self.negative_sampler is not None,
+            "spacy_available": self.use_spacy and self.nlp is not None,
         }
+
 
 # ============================================================================
 # Entity Processing Utilities
 # ============================================================================
 
-def build_entity_pipeline(use_pretrained: bool = True, model_name: str = "uk_core_news_trf"):
+
+def build_entity_pipeline(
+    use_pretrained: bool = True, model_name: str = "uk_core_news_trf"
+):
     """
     Build a complete spaCy NER pipeline for legal documents.
-    
+
     Args:
         use_pretrained: Whether to use pretrained model
         model_name: spaCy model name
-        
+
     Returns:
         spaCy Language object with legal NER components
     """
     if not ENTITIES_AVAILABLE:
-        raise ImportError("Entities module not available. Install required dependencies.")
-    
+        raise ImportError(
+            "Entities module not available. Install required dependencies."
+        )
+
     try:
         import spacy
         from .entities.__main__ import build_nlp
+
         return build_nlp(use_pretrained)
     except Exception as e:
         logger.error(f"Failed to build entity pipeline: {e}")
         raise
 
+
 def analyze_entities(text: str, nlp=None) -> str:
     """
     Analyze entities in text and return JSON result.
-    
+
     Args:
         text: Text to analyze
         nlp: Optional spaCy pipeline (will create if not provided)
-        
+
     Returns:
         JSON string with entity analysis
     """
     if not ENTITIES_AVAILABLE:
         raise ImportError("Entities module not available")
-    
+
     try:
         from .entities.__main__ import analyse
+
         if nlp is None:
             nlp = build_entity_pipeline()
         return analyse(text, nlp)
@@ -439,9 +474,11 @@ def analyze_entities(text: str, nlp=None) -> str:
         logger.error(f"Entity analysis failed: {e}")
         raise
 
+
 # ============================================================================
 # Module Status and Diagnostics
 # ============================================================================
+
 
 def get_module_status() -> Dict[str, Union[bool, str]]:
     """Get status of all processor modules."""
@@ -450,67 +487,76 @@ def get_module_status() -> Dict[str, Union[bool, str]]:
         "graph_extraction_available": GRAPH_EXTRACTION_AVAILABLE,
         "balance_available": BALANCE_AVAILABLE,
         "negative_sampling_available": NEGATIVE_SAMPLING_AVAILABLE,
-        "bigquery_utils_available": BIGQUERY_UTILS_AVAILABLE,
-        "all_modules_available": all([
-            ENTITIES_AVAILABLE,
-            GRAPH_EXTRACTION_AVAILABLE,
-            BALANCE_AVAILABLE,
-            NEGATIVE_SAMPLING_AVAILABLE,
-            BIGQUERY_UTILS_AVAILABLE
-        ])
+        "utils_available": BIGQUERY_UTILS_AVAILABLE,
+        "all_modules_available": all(
+            [
+                ENTITIES_AVAILABLE,
+                GRAPH_EXTRACTION_AVAILABLE,
+                BALANCE_AVAILABLE,
+                NEGATIVE_SAMPLING_AVAILABLE,
+                BIGQUERY_UTILS_AVAILABLE,
+            ]
+        ),
     }
+
 
 def check_dependencies() -> Dict[str, Union[bool, str]]:
     """Check if all required dependencies are available."""
     deps = {}
-    
+
     # Check spaCy
     try:
         import spacy
+
         deps["spacy"] = True
     except ImportError:
         deps["spacy"] = "pip install spacy"
-    
+
     # Check LangChain
     try:
         from langchain_community.chat_models import ChatOpenAI
+
         deps["langchain"] = True
     except ImportError:
         deps["langchain"] = "pip install langchain-community"
-    
+
     # Check pandas
     try:
         import pandas
+
         deps["pandas"] = True
     except ImportError:
         deps["pandas"] = "pip install pandas"
-    
+
     # Check pydantic
     try:
         import pydantic
+
         deps["pydantic"] = True
     except ImportError:
         deps["pydantic"] = "pip install pydantic"
-    
+
     # Check BigQuery
     try:
         from google.cloud import bigquery
+
         deps["bigquery"] = True
     except ImportError:
         deps["bigquery"] = "pip install google-cloud-bigquery"
-    
+
     return deps
+
 
 def print_module_info():
     """Print comprehensive module information."""
     print("TopoLegal Processors Module Status")
     print("=" * 40)
-    
+
     status = get_module_status()
     for module, available in status.items():
         status_icon = "✅" if available else "❌"
         print(f"{status_icon} {module}: {available}")
-    
+
     print("\nDependency Status")
     print("-" * 20)
     deps = check_dependencies()
@@ -519,16 +565,18 @@ def print_module_info():
             print(f"✅ {dep}: Available")
         else:
             print(f"❌ {dep}: {status}")
-    
+
     print(f"\nAvailable Classes and Functions:")
     print("-" * 30)
     available_items = [item for item in __all__ if globals().get(item) is not None]
     for item in available_items:
         print(f"• {item}")
 
+
 # ============================================================================
 # Legacy Compatibility
 # ============================================================================
+
 
 # Backward compatibility for existing code
 def extract_events(text: str, entities: List[Dict]):
@@ -536,11 +584,13 @@ def extract_events(text: str, entities: List[Dict]):
     warnings.warn(
         "extract_events is deprecated. Use DocumentProcessor.extract_knowledge_graph instead.",
         DeprecationWarning,
-        stacklevel=2
+        stacklevel=2,
     )
     processor = DocumentProcessor()
     import asyncio
+
     return asyncio.run(processor.extract_knowledge_graph(text, entities))
+
 
 # ============================================================================
 # Exports
@@ -548,61 +598,56 @@ def extract_events(text: str, entities: List[Dict]):
 
 __all__ = [
     # Core processor
-    'DocumentProcessor',
-
+    "DocumentProcessor",
     # Entity processing
-    'BaseMatcherComponent',
-    'build_entity_pipeline',
-    'analyze_entities',
-
+    "BaseMatcherComponent",
+    "build_entity_pipeline",
+    "analyze_entities",
     # Knowledge graph extraction
-    'LegalGraphExtractor',
-    'LegalKnowledgeGraph',
-    'KnowledgeTriplet',
-    'LegalEntity',
-    'process_legal_document',
-    'visualize_graphs',
-    'filter_zero_triplets',
-    'analyze_results',
-
-    # Data corruption (balance module)
-    'DataCorruptor',
-    'LegalReferenceCorruptor',
-    'CorruptionResult',
-    'BinaryClassificationCorruptor',
-
+    "LegalGraphExtractor",
+    "LegalKnowledgeGraph",
+    "KnowledgeTriplet",
+    "LegalEntity",
+    "process_legal_document",
+    "visualize_graphs",
+    "filter_zero_triplets",
+    "analyze_results",
+    # BigQuery dataset operations (balance module)
+    "BigQueryDatasetReformatter",
+    # Data corruption (deprecated - use negative_sampling instead)
+    "DataCorruptor",
+    "LegalReferenceCorruptor",
+    "CorruptionResult",
+    "BinaryClassificationCorruptor",
     # Negative sampling
-    'NegativeSampler',
-    'NegativeSampleResult',
-    'SamplingStrategy',
-    'ArticleOffsetStrategy',
-    'PartOffsetStrategy',
-    'CombinedOffsetStrategy',
-    'IndexSwapStrategy',
-    'RandomComponentStrategy',
-    'MixedStrategy',
-    'DEFAULT_STRATEGY',
-    'CONSERVATIVE_STRATEGY',
-    'AGGRESSIVE_STRATEGY',
-    'create_strategy',
-    'create_negative_samples',
-
+    "NegativeSampler",
+    "NegativeSampleResult",
+    "SamplingStrategy",
+    "ArticleOffsetStrategy",
+    "PartOffsetStrategy",
+    "CombinedOffsetStrategy",
+    "IndexSwapStrategy",
+    "RandomComponentStrategy",
+    "MixedStrategy",
+    "DEFAULT_STRATEGY",
+    "CONSERVATIVE_STRATEGY",
+    "AGGRESSIVE_STRATEGY",
+    "create_strategy",
+    "create_negative_samples",
     # BigQuery utilities
-    'BigQueryClient',
-    'BigQueryBatchProcessor',
-    'create_legal_document_table',
-    'check_legal_document_schema',
-    'get_triplet_statistics',
-    'parse_json_column',
-    'format_table_stats',
-
+    "BigQueryClient",
+    "BigQueryBatchProcessor",
+    "create_legal_document_table",
+    "check_legal_document_schema",
+    "get_triplet_statistics",
+    "parse_json_column",
+    "format_table_stats",
     # Utilities
-    'get_module_status',
-    'check_dependencies',
-    'print_module_info',
-
+    "get_module_status",
+    "check_dependencies",
+    "print_module_info",
     # Legacy (deprecated)
-    'extract_events',
+    "extract_events",
 ]
 
 # Remove None values from exports
@@ -613,10 +658,14 @@ __all__ = [item for item in __all__ if globals().get(item) is not None]
 # ============================================================================
 
 logger.info("TopoLegal Processors module initialized")
-logger.info(f"Available modules: {[k for k, v in get_module_status().items() if v and k != 'all_modules_available']}")
+logger.info(
+    f"Available modules: {[k for k, v in get_module_status().items() if v and k != 'all_modules_available']}"
+)
 
 # Show warnings for missing modules
-missing_modules = [k for k, v in get_module_status().items() if not v and k != 'all_modules_available']
+missing_modules = [
+    k for k, v in get_module_status().items() if not v and k != "all_modules_available"
+]
 if missing_modules:
     logger.warning(f"Some modules are not available: {missing_modules}")
     logger.warning("Run processors.check_dependencies() for installation instructions")

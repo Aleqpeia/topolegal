@@ -32,28 +32,62 @@ dataset = GraphDataset(
 dataloader = create_dataloader(dataset, batch_size=32, shuffle=True)
 ```
 
-### 3. BigQuery Setup (Optional)
-To use real BigQuery data:
+## Dataset Reformatting
+
+### Overview
+The dataset reformatting tools extract JSON triplet arrays into columnar format and create stratified train/test/val splits.
+
+### Quick Commands
 
 ```bash
-# Install BigQuery client
-pip install google-cloud-bigquery
+# Analyze dataset statistics
+python bigquery_dataset_reformatter.py analyze \
+    --table project.dataset.source_table
 
-# Authenticate with Google Cloud
-gcloud auth application-default login
+# Reformat dataset (extract JSON to columns)
+python bigquery_dataset_reformatter.py reformat \
+    --source-table project.dataset.source_table \
+    --dest-table project.dataset.reformatted_table
 
-# Or set environment variable
-export GOOGLE_APPLICATION_CREDENTIALS="path/to/service-account-key.json"
+# Create stratified splits
+python bigquery_dataset_reformatter.py split \
+    --source-table project.dataset.reformatted_table \
+    --train-table project.dataset.train \
+    --test-table project.dataset.test \
+    --val-table project.dataset.val \
+    --stratify-by legal_reference
+
+# Validate splits
+python bigquery_dataset_reformatter.py validate \
+    --train-table project.dataset.train \
+    --test-table project.dataset.test \
+    --val-table project.dataset.val
+
+
+### Schema Transformation
+
+**Before:** JSON array in `triplets` column
+```json
+{"source": "ОСОБА_1", "relation": "визнаний_винним", "target": "крадіжка",
+ "legal_reference": "ч.2 ст.185 КК України", "confidence": 0.95}
 ```
 
-### 4. Training
-```bash
-# Run training notebook
-jupyter notebook models/notebooks/training.ipynb
+**After:** Separate columns
+- `legal_reference`, `source`, `target`, `relation`, `confidence`
+- Plus metadata: `article_number`, `part_number`, `legal_code`
 
-# Or use demo scripts
-python -m models bigquery-demo --table your-project.dataset.table
-```
+### Stratification Options
+- `legal_reference` - By legal article (default, recommended)
+- `relation` - By relation type
+- `legal_code` - By legal code (КК, КПК, etc.)
+
+### Files
+- `bigquery_dataset_reformatter.py` - Python utility
+- `bigquery_reformatting_queries.sql` - SQL queries
+- `DATASET_REFORMATTING_GUIDE.md` - Complete guide
+- `DATASET_REFORMATTING_QUICKREF.md` - Quick reference
+- `example_dataset_reformatting.py` - Example workflow
+
 
 ## Architecture
 

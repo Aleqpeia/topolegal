@@ -10,11 +10,10 @@ Provides common functions for:
 - Statistics gathering
 """
 
-import os
-import logging
-from typing import Dict, List, Optional, Any, Callable
-from datetime import datetime
 import json
+import logging
+import os
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +28,7 @@ class BigQueryClient:
         self,
         project: Optional[str] = None,
         key_path: Optional[str] = None,
-        location: str = "us-central1"
+        location: str = "us-central1",
     ):
         """
         Initialize BigQuery client with optional credentials.
@@ -54,8 +53,7 @@ class BigQueryClient:
             os.environ["GOOGLE_CLOUD_PROJECT"] = project
 
         self.client = bigquery.Client(
-            project=os.environ.get("GOOGLE_CLOUD_PROJECT"),
-            location=location
+            project=os.environ.get("GOOGLE_CLOUD_PROJECT"), location=location
         )
         self.bigquery = bigquery
         logger.info(f"Initialized BigQuery client for project: {self.client.project}")
@@ -88,12 +86,7 @@ class BigQueryClient:
             logger.debug(f"Successfully inserted {len(rows)} rows into {table_id}")
         return errors
 
-    def create_table(
-        self,
-        table_id: str,
-        schema: List,
-        exists_ok: bool = True
-    ):
+    def create_table(self, table_id: str, schema: List, exists_ok: bool = True):
         """
         Create a BigQuery table with given schema.
 
@@ -131,9 +124,7 @@ class BigQueryClient:
             return {}
 
     def check_required_columns(
-        self,
-        table_id: str,
-        required_columns: List[str]
+        self, table_id: str, required_columns: List[str]
     ) -> tuple[bool, List[str]]:
         """
         Check if table has required columns.
@@ -159,11 +150,11 @@ class BigQueryClient:
         try:
             table = self.client.get_table(table_id)
             return {
-                'num_rows': table.num_rows,
-                'num_bytes': table.num_bytes,
-                'created': table.created,
-                'modified': table.modified,
-                'schema_fields': len(table.schema)
+                "num_rows": table.num_rows,
+                "num_bytes": table.num_bytes,
+                "created": table.created,
+                "modified": table.modified,
+                "schema_fields": len(table.schema),
             }
         except Exception as e:
             logger.error(f"Error getting stats for {table_id}: {e}")
@@ -177,10 +168,7 @@ class BigQueryBatchProcessor:
     """
 
     def __init__(
-        self,
-        client: BigQueryClient,
-        batch_size: int = 100,
-        log_interval: int = 10
+        self, client: BigQueryClient, batch_size: int = 100, log_interval: int = 10
     ):
         """
         Initialize batch processor.
@@ -203,7 +191,7 @@ class BigQueryBatchProcessor:
         processor_func: Callable[[List[Dict]], List[Dict]],
         output_table_id: Optional[str] = None,
         where_clause: Optional[str] = None,
-        select_columns: Optional[List[str]] = None
+        select_columns: Optional[List[str]] = None,
     ) -> Dict:
         """
         Process all rows in a table in batches.
@@ -245,7 +233,7 @@ class BigQueryBatchProcessor:
                 break
 
             # Convert to list of dicts
-            batch_data = rows_df.to_dict('records')
+            batch_data = rows_df.to_dict("records")
 
             try:
                 # Process batch
@@ -253,7 +241,9 @@ class BigQueryBatchProcessor:
 
                 # Insert to output table if specified
                 if output_table_id and processed_data:
-                    errors = self.client.insert_rows_json(output_table_id, processed_data)
+                    errors = self.client.insert_rows_json(
+                        output_table_id, processed_data
+                    )
                     if errors:
                         self.error_count += len(errors)
                     else:
@@ -263,20 +253,41 @@ class BigQueryBatchProcessor:
 
                 # Log progress
                 if self.processed_count % (self.batch_size * self.log_interval) == 0:
-                    logger.info(f"📊 Processed {self.processed_count} rows "
-                              f"(success: {self.success_count}, errors: {self.error_count})")
+                    logger.info(
+                        f"📊 Processed {self.processed_count} rows "
+                        f"(success: {self.success_count}, errors: {self.error_count})"
+                    )
 
             except Exception as e:
-                logger.error(f"Error processing batch at offset {self.processed_count}: {e}")
+                logger.error(
+                    f"Error processing batch at offset {self.processed_count}: {e}"
+                )
                 self.error_count += len(batch_data)
                 self.processed_count += len(batch_data)
                 continue
 
         return {
-            'total_processed': self.processed_count,
-            'success_count': self.success_count,
-            'error_count': self.error_count
+            "total_processed": self.processed_count,
+            "success_count": self.success_count,
+            "error_count": self.error_count,
         }
+
+
+# ============================================================================
+# BigQuery Dataset Reformatting (moved to balance module)
+# ============================================================================
+
+# For backward compatibility, import from balance module
+try:
+    from .balance import BigQueryDatasetReformatter
+except ImportError:
+    logger.warning(
+        "Balance module not available. BigQueryDatasetReformatter not imported."
+    )
+    BigQueryDatasetReformatter = None
+
+# Legacy alias for backward compatibility
+BigQueryJSONFunctions = BigQueryDatasetReformatter
 
 
 def create_legal_document_table(
@@ -285,7 +296,7 @@ def create_legal_document_table(
     include_entities: bool = True,
     include_triplets: bool = True,
     include_labels: bool = False,
-    label_column: str = "is_valid"
+    label_column: str = "is_valid",
 ):
     """
     Create a standard legal document table schema.
@@ -305,16 +316,26 @@ def create_legal_document_table(
 
     if include_entities:
         schema.append(client.bigquery.SchemaField("entities", "JSON", mode="NULLABLE"))
-        schema.append(client.bigquery.SchemaField("tags", "STRING", mode="NULLABLE"))  # Legacy
+        schema.append(
+            client.bigquery.SchemaField("tags", "STRING", mode="NULLABLE")
+        )  # Legacy
 
     if include_triplets:
         schema.append(client.bigquery.SchemaField("triplets", "JSON", mode="NULLABLE"))
-        schema.append(client.bigquery.SchemaField("triplets_count", "INTEGER", mode="NULLABLE"))
+        schema.append(
+            client.bigquery.SchemaField("triplets_count", "INTEGER", mode="NULLABLE")
+        )
 
     if include_labels:
-        schema.append(client.bigquery.SchemaField(label_column, "BOOLEAN", mode="REQUIRED"))
+        schema.append(
+            client.bigquery.SchemaField(label_column, "BOOLEAN", mode="REQUIRED")
+        )
 
-    schema.append(client.bigquery.SchemaField("processing_timestamp", "TIMESTAMP", mode="NULLABLE"))
+    schema.append(
+        client.bigquery.SchemaField(
+            "processing_timestamp", "TIMESTAMP", mode="NULLABLE"
+        )
+    )
 
     return client.create_table(table_id, schema, exists_ok=True)
 
@@ -323,7 +344,7 @@ def check_legal_document_schema(
     client: BigQueryClient,
     table_id: str,
     require_entities: bool = False,
-    require_triplets: bool = False
+    require_triplets: bool = False,
 ) -> tuple[bool, List[str]]:
     """
     Check if table has standard legal document schema.
@@ -412,7 +433,7 @@ def parse_json_column(value: Any) -> Any:
         return value.tolist()
 
     # JSON string
-    if isinstance(value, str) and value.strip() and value != 'nan':
+    if isinstance(value, str) and value.strip() and value != "nan":
         try:
             return json.loads(value)
         except (json.JSONDecodeError, ValueError):
@@ -438,17 +459,19 @@ def format_table_stats(stats: Dict) -> str:
         f"  Documents with positive count: {stats.get('docs_with_positive_count', 0):,}",
         f"  Average triplets per doc: {stats.get('avg_triplets_per_doc', 0):.2f}",
         f"  Max triplets per doc: {stats.get('max_triplets_per_doc', 0):,}",
-        f"  Total triplets: {stats.get('total_triplets', 0):,}"
+        f"  Total triplets: {stats.get('total_triplets', 0):,}",
     ]
     return "\n".join(lines)
 
 
 __all__ = [
-    'BigQueryClient',
-    'BigQueryBatchProcessor',
-    'create_legal_document_table',
-    'check_legal_document_schema',
-    'get_triplet_statistics',
-    'parse_json_column',
-    'format_table_stats'
+    "BigQueryClient",
+    "BigQueryBatchProcessor",
+    "BigQueryDatasetReformatter",  # Preferred name
+    "BigQueryJSONFunctions",  # Legacy alias for backward compatibility
+    "create_legal_document_table",
+    "check_legal_document_schema",
+    "get_triplet_statistics",
+    "parse_json_column",
+    "format_table_stats",
 ]
