@@ -305,100 +305,69 @@ async def run_bigquery(table_id: str, batch: int, extractor: LegalGraphExtractor
                  project: Optional[str] = None, key_path: Optional[str] = None,
                  update_existing: bool = False):
     """Process documents from BigQuery table and update with triplet extraction results"""
-    try:
-        from google.cloud import bigquery
-    except ImportError:
-        logger.error("BigQuery not available. Install: pip install google-cloud-bigquery")
-        return
+    from ..bigquery_utils import BigQueryClient, parse_json_column
 
-    # Honour CLI / .env overrides
-    if key_path:
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key_path
-    if project:
-        os.environ["GOOGLE_CLOUD_PROJECT"] = project
-    
-    client = bigquery.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT"), location="us-central1")
+    # Initialize client
+    client = BigQueryClient(project=project, key_path=key_path)
 
     total = 0
-    while True:
-        # Pull the next batch of unprocessed rows
-        if update_existing:
-            # Update existing records that don't have triplets or have 0 triplets
-            sql = f"""
-                SELECT  doc_id,
-                        text,
-                        tags,
-                        triplets_count
-                FROM    `{table_id}`
-                WHERE   (triplets_count IS NULL OR triplets_count = 0)
-                    AND text IS NOT NULL
-                    AND tags IS NOT NULL
-                    AND LENGTH(text) > 10
-                LIMIT   {batch}
-            """
-        else:
-            # Process all records that don't have triplets
-            sql = f"""
-                SELECT  doc_id,
-                        text,
-                        tags,
-                        triplets_count
-                FROM    `{table_id}`
-                WHERE   triplets_count IS NULL
-                    AND text IS NOT NULL
-                    AND tags IS NOT NULL
-                    AND LENGTH(text) > 10
-                LIMIT   {batch}
-            """
-            
-        job = client.query(sql)
-        logger.info("Batch job %s submitted", job.job_id)
-        rows = job.result().to_dataframe()
+    processed = 0
 
-        if rows.empty:
+    # Determine WHERE clause based on update mode
+    if update_existing:
+        where_clause = "(triplets_count IS NULL OR triplets_count = 0) AND text IS NOT NULL AND tags IS NOT NULL AND LENGTH(text) > 10"
+    else:
+        where_clause = "triplets_count IS NULL AND text IS NOT NULL AND tags IS NOT NULL AND LENGTH(text) > 10"
+
+    while True:
+        # Fetch batch
+        sql = f"""
+            SELECT doc_id, text, tags, triplets_count
+            FROM `{table_id}`
+            WHERE {where_clause}
+            LIMIT {batch}
+        """
+
+        rows_df = client.query_to_dataframe(sql)
+
+        if rows_df.empty:
             logger.info("No more documents to process")
             break
-            
-        for _, row in rows.iterrows():
+
+        for _, row in rows_df.iterrows():
             try:
                 doc_id = str(row.doc_id)
                 text = str(row.text)
-                
-                # Parse entities from tags column
-                entities = []
-                if hasattr(row, 'tags') and pd.notna(row.tags):
-                    try:
-                        entities = json.loads(str(row.tags))
-                    except:
-                        logger.warning(f"Could not parse entities for doc {doc_id}")
 
-                # Process document - use await directly since we're in an async function
+                # Parse entities
+                entities = parse_json_column(row.get('tags')) or []
+
+                # Process document
                 result = await process_document(text, entities, doc_id, extractor)
-                
-                # Prepare the update data
-                triplets_json = json.dumps(result.get('knowledge_graph', {}).get('triplets', []), ensure_ascii=False)
-                # Escape the JSON for BigQuery
+
+                # Prepare update data
+                triplets = result.get('knowledge_graph', {}).get('triplets', [])
+                triplets_json = json.dumps(triplets, ensure_ascii=False)
                 triplets_json_escaped = triplets_json.replace("'", "\\'").replace('"', '\\"')
                 triplets_count = result.get('triplets_count', 0)
-                
-                # Update the existing table with triplet results
+
+                # Update table
                 update_sql = f"""
                     UPDATE `{table_id}`
                     SET triplets = JSON '{triplets_json_escaped}',
                         triplets_count = @triplets_count
                     WHERE CAST(doc_id AS STRING) = @doc_id
                 """
-                
-                # Execute the update
-                job_config = bigquery.QueryJobConfig(
+
+                job_config = client.bigquery.QueryJobConfig(
                     query_parameters=[
-                        bigquery.ScalarQueryParameter("triplets_count", "INTEGER", triplets_count),
-                        bigquery.ScalarQueryParameter("doc_id", "STRING", doc_id),
+                        client.bigquery.ScalarQueryParameter("triplets_count", "INTEGER", triplets_count),
+                        client.bigquery.ScalarQueryParameter("doc_id", "STRING", doc_id),
                     ]
                 )
-                
-                update_job = client.query(update_sql, job_config=job_config)
-                update_job.result()  # Wait for the update to complete
+
+                update_job = client.client.query(update_sql, job_config=job_config)
+                update_job.result()
 
                 total += 1
                 logger.info(f"Processed doc {doc_id}: {triplets_count} triplets")
@@ -406,41 +375,37 @@ async def run_bigquery(table_id: str, batch: int, extractor: LegalGraphExtractor
             except Exception as e:
                 logger.error(f"BQ doc {row.doc_id}: {e}")
 
-        logger.info("Processed %d rows in this batch", total)
+        processed += len(rows_df)
+        logger.info(f"Processed {processed} rows in this batch, {total} successful")
 
 
 def check_bigquery_schema(table_id: str):
     """Check if the BigQuery table has the required columns"""
+    from ..bigquery_utils import BigQueryClient, check_legal_document_schema
+
     try:
-        from google.cloud import bigquery
-        
-        client = bigquery.Client()
-        table = client.get_table(table_id)
-        columns = [field.name for field in table.schema]
-        
-        required_columns = ['doc_id', 'text', 'tags']
-        optional_columns = ['triplets', 'triplets_count', 'processing_timestamp']
-        
-        missing_required = [col for col in required_columns if col not in columns]
-        existing_optional = [col for col in optional_columns if col in columns]
-        
+        client = BigQueryClient()
+        is_valid, missing = check_legal_document_schema(
+            client=client,
+            table_id=table_id,
+            require_entities=True,
+            require_triplets=False
+        )
+
+        # Get full schema for logging
+        schema = client.get_table_schema(table_id)
+
         logger.info(f"Table schema check for {table_id}:")
-        logger.info(f"Required columns: {required_columns}")
-        logger.info(f"Optional columns: {optional_columns}")
-        logger.info(f"Missing required: {missing_required}")
-        logger.info(f"Existing optional: {existing_optional}")
-        
-        # Log the actual schema details
         logger.info("Actual table schema:")
-        for field in table.schema:
-            logger.info(f"  {field.name}: {field.field_type}")
-        
-        if missing_required:
-            logger.error(f"Missing required columns: {missing_required}")
+        for col, col_type in schema.items():
+            logger.info(f"  {col}: {col_type}")
+
+        if not is_valid:
+            logger.error(f"Missing required columns: {missing}")
             return False
-            
+
         return True
-        
+
     except Exception as e:
         logger.error(f"Failed to check table schema: {e}")
         return False
@@ -448,39 +413,17 @@ def check_bigquery_schema(table_id: str):
 
 def get_bigquery_stats(table_id: str):
     """Get statistics about triplet processing status"""
+    from ..bigquery_utils import BigQueryClient, get_triplet_statistics, format_table_stats
+
     try:
-        from google.cloud import bigquery
-        
-        client = bigquery.Client()
-        
-        sql = f"""
-        SELECT 
-            COUNT(*) as total_docs,
-            COUNTIF(triplets_count IS NULL) as docs_without_triplets,
-            COUNTIF(triplets_count = 0) as docs_with_zero_triplets,
-            COUNTIF(triplets_count > 0) as docs_with_triplets,
-            AVG(triplets_count) as avg_triplets,
-            MAX(triplets_count) as max_triplets
-        FROM `{table_id}`
-        WHERE text IS NOT NULL
-        """
-        
-        job = client.query(sql)
-        results = job.result().to_dataframe()
-        
-        if not results.empty:
-            row = results.iloc[0]
-            logger.info(f"""
-Processing Statistics:
-====================
-Total documents: {row.total_docs}
-Documents without triplets: {row.docs_without_triplets}
-Documents with zero triplets: {row.docs_with_zero_triplets}
-Documents with triplets: {row.docs_with_triplets}
-Average triplets per doc: {row.avg_triplets:.2f}
-Maximum triplets in a doc: {row.max_triplets}
-            """)
-        
+        client = BigQueryClient()
+        stats = get_triplet_statistics(client, table_id)
+
+        if stats:
+            logger.info(format_table_stats(stats))
+        else:
+            logger.warning("No statistics available")
+
     except Exception as e:
         logger.error(f"Failed to get processing stats: {e}")
 
