@@ -1,0 +1,20 @@
+[tool.poetry]
+name = "legal_graph_negative_sampling"
+version = "0.1.0"
+description = "Negative sampling module for Ukrainian legal documents"
+authors = [
+    "Illia Savenko <savenko.ilya@lll.kpi.ua>",
+    "Mykyta Bobylyow <mbobylyov@biph.kiev.ua>"
+]
+readme = "README.md"
+packages = [{ include = "legal_graph", from = "src" }]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<4.0"
+pydantic = "^2.0.0"
+pandas = "^2.0.0"
+google-cloud-bigquery = "^3.24.0"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

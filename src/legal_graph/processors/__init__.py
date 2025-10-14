@@ -81,6 +81,72 @@ except ImportError as e:
     BinaryClassificationCorruptor = None
     BALANCE_AVAILABLE = False
 
+# ============================================================================
+# Negative Sampling for Hard Negatives
+# ============================================================================
+
+try:
+    from .negative_sampling import (
+        NegativeSampler,
+        NegativeSampleResult,
+        SamplingStrategy,
+        ArticleOffsetStrategy,
+        PartOffsetStrategy,
+        CombinedOffsetStrategy,
+        IndexSwapStrategy,
+        RandomComponentStrategy,
+        MixedStrategy,
+        DEFAULT_STRATEGY,
+        CONSERVATIVE_STRATEGY,
+        AGGRESSIVE_STRATEGY,
+        create_strategy,
+        create_negative_samples
+    )
+    NEGATIVE_SAMPLING_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Negative sampling module not fully available: {e}")
+    NegativeSampler = None
+    NegativeSampleResult = None
+    SamplingStrategy = None
+    ArticleOffsetStrategy = None
+    PartOffsetStrategy = None
+    CombinedOffsetStrategy = None
+    IndexSwapStrategy = None
+    RandomComponentStrategy = None
+    MixedStrategy = None
+    DEFAULT_STRATEGY = None
+    CONSERVATIVE_STRATEGY = None
+    AGGRESSIVE_STRATEGY = None
+    create_strategy = None
+    create_negative_samples = None
+    NEGATIVE_SAMPLING_AVAILABLE = False
+
+# ============================================================================
+# BigQuery Utilities
+# ============================================================================
+
+try:
+    from .bigquery_utils import (
+        BigQueryClient,
+        BigQueryBatchProcessor,
+        create_legal_document_table,
+        check_legal_document_schema,
+        get_triplet_statistics,
+        parse_json_column,
+        format_table_stats
+    )
+    BIGQUERY_UTILS_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"BigQuery utilities not fully available: {e}")
+    BigQueryClient = None
+    BigQueryBatchProcessor = None
+    create_legal_document_table = None
+    check_legal_document_schema = None
+    get_triplet_statistics = None
+    parse_json_column = None
+    format_table_stats = None
+    BIGQUERY_UTILS_AVAILABLE = False
+
 
 
 # ============================================================================
@@ -103,24 +169,31 @@ class DocumentProcessor:
         custom_entity_extractor: Optional[Callable[[str], List[Dict]]] = None,
         enable_corruption: bool = False,
         corruption_probability: float = 0.5,
+        enable_negative_sampling: bool = False,
+        sampling_strategy: str = 'mixed',
+        sampling_probability: float = 0.5,
         temperature: float = 0.8
     ):
         """
         Initialize the unified document processor.
-        
+
         Args:
             model_name: LLM model name for graph extraction
             use_spacy: Whether to use spaCy for entity extraction
             spacy_model: spaCy model to use
             custom_entity_extractor: Custom entity extraction function
-            enable_corruption: Whether to enable data corruption capabilities
+            enable_corruption: Whether to enable data corruption capabilities (balance module)
             corruption_probability: Probability for data corruption
+            enable_negative_sampling: Whether to enable negative sampling (hard negatives)
+            sampling_strategy: Negative sampling strategy ('article', 'part', 'mixed', etc.)
+            sampling_probability: Probability for negative sampling
             temperature: LLM temperature for graph extraction
         """
         self.use_spacy = use_spacy
         self.custom_entity_extractor = custom_entity_extractor
         self.enable_corruption = enable_corruption
-        
+        self.enable_negative_sampling = enable_negative_sampling
+
         # Initialize spaCy if requested
         self.nlp = None
         if use_spacy and ENTITIES_AVAILABLE:
@@ -131,7 +204,7 @@ class DocumentProcessor:
             except Exception as e:
                 logger.warning(f"Failed to load spaCy model {spacy_model}: {e}")
                 self.use_spacy = False
-        
+
         # Initialize graph extractor
         self.graph_extractor = None
         if GRAPH_EXTRACTION_AVAILABLE:
@@ -143,8 +216,8 @@ class DocumentProcessor:
                 logger.info(f"Initialized graph extractor with model: {model_name}")
             except Exception as e:
                 logger.warning(f"Failed to initialize graph extractor: {e}")
-        
-        # Initialize corruptor if requested
+
+        # Initialize corruptor if requested (balance module)
         self.corruptor = None
         if enable_corruption and BALANCE_AVAILABLE:
             try:
@@ -154,6 +227,18 @@ class DocumentProcessor:
                 logger.info(f"Initialized data corruptor with probability: {corruption_probability}")
             except Exception as e:
                 logger.warning(f"Failed to initialize corruptor: {e}")
+
+        # Initialize negative sampler if requested
+        self.negative_sampler = None
+        if enable_negative_sampling and NEGATIVE_SAMPLING_AVAILABLE:
+            try:
+                self.negative_sampler = NegativeSampler(
+                    sampling_probability=sampling_probability,
+                    strategy=sampling_strategy
+                )
+                logger.info(f"Initialized negative sampler with strategy: {sampling_strategy}")
+            except Exception as e:
+                logger.warning(f"Failed to initialize negative sampler: {e}")
     
     def extract_entities(self, text: str) -> List[Dict]:
         """
@@ -255,31 +340,53 @@ class DocumentProcessor:
     
     def corrupt_data(self, dataset: List[Dict], label_column: str = "is_valid") -> List[Dict]:
         """
-        Apply data corruption to a dataset.
-        
+        Apply data corruption to a dataset (balance module).
+
         Args:
             dataset: List of data samples
             label_column: Column name for corruption labels
-            
+
         Returns:
             Corrupted dataset with labels
         """
         if not self.corruptor:
             logger.error("Data corruptor not available")
             return dataset
-        
+
         try:
             return self.corruptor.corrupt_dataset(dataset, label_column=label_column)
         except Exception as e:
             logger.error(f"Data corruption failed: {e}")
             return dataset
-    
+
+    def create_negative_samples(self, dataset: List[Dict], label_column: str = "is_valid") -> List[Dict]:
+        """
+        Create negative samples from a dataset using negative sampling.
+
+        Args:
+            dataset: List of data samples
+            label_column: Column name for validity labels
+
+        Returns:
+            Dataset with negative samples and validity labels
+        """
+        if not self.negative_sampler:
+            logger.error("Negative sampler not available")
+            return dataset
+
+        try:
+            return self.negative_sampler.create_negative_samples(dataset, label_column=label_column)
+        except Exception as e:
+            logger.error(f"Negative sampling failed: {e}")
+            return dataset
+
     def get_capabilities(self) -> Dict[str, bool]:
         """Get information about available capabilities."""
         return {
             "entity_extraction": ENTITIES_AVAILABLE and (self.use_spacy or self.custom_entity_extractor is not None),
             "knowledge_graph_extraction": GRAPH_EXTRACTION_AVAILABLE and self.graph_extractor is not None,
             "data_corruption": BALANCE_AVAILABLE and self.corruptor is not None,
+            "negative_sampling": NEGATIVE_SAMPLING_AVAILABLE and self.negative_sampler is not None,
             "spacy_available": self.use_spacy and self.nlp is not None
         }
 
@@ -342,7 +449,15 @@ def get_module_status() -> Dict[str, Union[bool, str]]:
         "entities_available": ENTITIES_AVAILABLE,
         "graph_extraction_available": GRAPH_EXTRACTION_AVAILABLE,
         "balance_available": BALANCE_AVAILABLE,
-        "all_modules_available": all([ENTITIES_AVAILABLE, GRAPH_EXTRACTION_AVAILABLE, BALANCE_AVAILABLE])
+        "negative_sampling_available": NEGATIVE_SAMPLING_AVAILABLE,
+        "bigquery_utils_available": BIGQUERY_UTILS_AVAILABLE,
+        "all_modules_available": all([
+            ENTITIES_AVAILABLE,
+            GRAPH_EXTRACTION_AVAILABLE,
+            BALANCE_AVAILABLE,
+            NEGATIVE_SAMPLING_AVAILABLE,
+            BIGQUERY_UTILS_AVAILABLE
+        ])
     }
 
 def check_dependencies() -> Dict[str, Union[bool, str]]:
@@ -434,35 +549,58 @@ def extract_events(text: str, entities: List[Dict]):
 __all__ = [
     # Core processor
     'DocumentProcessor',
-    
+
     # Entity processing
     'BaseMatcherComponent',
     'build_entity_pipeline',
     'analyze_entities',
-    
+
     # Knowledge graph extraction
     'LegalGraphExtractor',
-    'LegalKnowledgeGraph', 
+    'LegalKnowledgeGraph',
     'KnowledgeTriplet',
     'LegalEntity',
     'process_legal_document',
     'visualize_graphs',
     'filter_zero_triplets',
     'analyze_results',
-    
-    # Data corruption
+
+    # Data corruption (balance module)
     'DataCorruptor',
     'LegalReferenceCorruptor',
     'CorruptionResult',
     'BinaryClassificationCorruptor',
-    
 
-    
+    # Negative sampling
+    'NegativeSampler',
+    'NegativeSampleResult',
+    'SamplingStrategy',
+    'ArticleOffsetStrategy',
+    'PartOffsetStrategy',
+    'CombinedOffsetStrategy',
+    'IndexSwapStrategy',
+    'RandomComponentStrategy',
+    'MixedStrategy',
+    'DEFAULT_STRATEGY',
+    'CONSERVATIVE_STRATEGY',
+    'AGGRESSIVE_STRATEGY',
+    'create_strategy',
+    'create_negative_samples',
+
+    # BigQuery utilities
+    'BigQueryClient',
+    'BigQueryBatchProcessor',
+    'create_legal_document_table',
+    'check_legal_document_schema',
+    'get_triplet_statistics',
+    'parse_json_column',
+    'format_table_stats',
+
     # Utilities
     'get_module_status',
     'check_dependencies',
     'print_module_info',
-    
+
     # Legacy (deprecated)
     'extract_events',
 ]
