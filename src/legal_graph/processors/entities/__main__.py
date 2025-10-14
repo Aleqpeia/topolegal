@@ -222,69 +222,58 @@ SRC  = "lab-test-project-1-305710.court_data_2022.document_data"             # o
 
 def run_bigquery(src: str, dest: str, batch: int, nlp,
                  project: str | None = None, key_path: str | None = None):
-    # honour CLI / .env overrides
-    if key_path:
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key_path
-    client = bigquery.Client(project=os.environ["GOOGLE_CLOUD_PROJECT"], location="us-central1")
+    from ..bigquery_utils import BigQueryClient
 
-    total  = 0
+    # Initialize client
+    client = BigQueryClient(project=project, key_path=key_path)
+
+    total = 0
+    processed = 0
+
     while True:
         # Pull the next batch of unprocessed rows
         sql = f"""
             SELECT  src.doc_id,
-                    src.doc_url   
+                    src.doc_url
             FROM    `{SRC}`  AS src
             LEFT JOIN `{DEST}` AS dst
                 ON dst.doc_id = src.doc_id
-            WHERE dst.doc_id IS NULL                      -- not processed yet
+            WHERE dst.doc_id IS NULL
             LIMIT {batch}
         """
-        job = client.query(sql)
-        logging.info("Batch job %s submitted", job.job_id)
-        rows = job.result().to_dataframe()
+
+        rows = client.query_to_dataframe(sql)
 
         if rows.empty:
+            logging.info("No more documents to process")
             break
+
         for _, r in rows.iterrows():
             try:
                 plain, links = annotate_links(clean(rtf_to_plain(fetch_rtf(r.doc_url))))
-                tags    = analyse(plain, nlp)
+                tags = analyse(plain, nlp)
 
                 # Stream the processed record into the destination table
-                client.insert_rows_json(
+                errors = client.insert_rows_json(
                     DEST,
                     [{
                         "doc_id": r.doc_id,
-                        "text":  plain,
+                        "text": plain,
                         "links": json.dumps(links, ensure_ascii=False),
-                        "tags":  tags,
-                    }],
-                    row_ids=[str(r.doc_id)]          # idempotent insert
+                        "tags": tags,
+                    }]
                 )
 
-                # Optionally mark the source row as done so we never re-process it
-                # client.query(
-                #     f"""
-                #     UPDATE `{DEST}`
-                #        SET text = @text AND doc_id = @r.doc_id
-                #        WHERE doc_id is NULL
-                #     """,
-                #     job_config=bigquery.QueryJobConfig(
-                #         query_parameters=[
-                #             bigquery.ScalarQueryParameter("tags", "STRING", tags),
-                #             bigquery.ScalarQueryParameter("links", "STRING", links),
-                #             bigquery.ScalarQueryParameter("text", "STRING", plain),
-                #             bigquery.ScalarQueryParameter("doc_id",   "INTEGER", r.doc_id),
-                #         ]
-                #     ),
-                # ).result()
-
-                total += 1
+                if not errors:
+                    total += 1
+                else:
+                    logging.error("Insert errors for doc %s: %s", r.doc_id, errors)
 
             except Exception as e:
                 logging.error("BQ doc %s: %s", r.doc_id, e)
 
-        logging.info("processed %d rows", total)
+        processed += len(rows)
+        logging.info("Processed %d rows in this batch, %d successful", processed, total)
         
 
 
