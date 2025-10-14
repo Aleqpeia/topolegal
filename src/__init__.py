@@ -1,17 +1,11 @@
 """
 Usage:
-    from topolegal.models import VisionCompliantGraphCheck, create_vision_compliant_model
-    from topolegal.models import create_sample_dataset
-    
-    # Create model
-    model = create_vision_compliant_model(config)
-    
     # Get sample data
     documents = create_sample_dataset()
 """
 
 # Import main models package
-from src.legal_graph import models
+from src.legal_graph import processors
 
 # Package metadata
 __version__ = "0.1.0"
@@ -25,7 +19,6 @@ __license__ = "MIT"
 
 # Main exports
 __all__ = [
-    "models",
     "processors",
     "__version__",
     "__author__", 
