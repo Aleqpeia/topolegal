@@ -1,19 +1,4 @@
 """
-TopoLegal: Vision-Compliant Graph-Based Legal Reference Validation
-
-A comprehensive system for validating legal references in Ukrainian documents using
-graph neural networks and frozen transformer models.
-
-This package implements a vision-compliant architecture that follows the exact
-data flow: INPUT → SYNTHETIC → GNN → PROJECTOR → FUSION → OUTPUT
-
-Key Features:
-- 🔒 Frozen transformer components (BERT/T5/RoBERTa)
-- 🔄 Trainable graph neural networks
-- 🇺🇦 Ukrainian legal code validation
-- 📊 PyTorch Geometric graph processing
-- 📈 Comprehensive training and evaluation tools
-
 Usage:
     from topolegal.models import VisionCompliantGraphCheck, create_vision_compliant_model
     from topolegal.models import create_sample_dataset
@@ -29,14 +14,19 @@ Usage:
 from src.legal_graph import models
 
 # Package metadata
-__version__ = "1.0.0"
-__author__ = "TopoLegal Team"
-__description__ = "Vision-compliant graph-based legal reference validation system"
+__version__ = "0.1.0"
+__description__ = "LLM knowledge usage in graph neural network for highly accurate multi-task modular AI/ML system"
+__authors__ = [
+    "Illia Savenko <savenko.ilya@lll.kpi.ua>",
+    "Mykyta Bobylyow <mbobylyov@biph.kiev.ua>"
+]
+__readme__ = "README.md"
 __license__ = "MIT"
 
 # Main exports
 __all__ = [
     "models",
+    "processors",
     "__version__",
     "__author__", 
     "__description__",

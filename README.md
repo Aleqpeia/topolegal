@@ -4,7 +4,6 @@ A graph-based legal reference validation system for Ukrainian legal documents us
 
 ## Features
 
-- 🔒 **Vision-Compliant Architecture**: Frozen transformers with trainable GNN components
 - 📊 **BigQuery Integration**: Direct connection to Google Cloud BigQuery for large-scale legal datasets
 - 🇺🇦 **Ukrainian Legal Codes**: Support for КК України, КПК України, ЦК України, КоАП України
 - 📈 **PyTorch Geometric**: Graph neural networks for legal knowledge representation
